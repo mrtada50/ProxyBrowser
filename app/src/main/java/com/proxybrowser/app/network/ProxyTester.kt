@@ -2,10 +2,11 @@ package com.proxybrowser.app.network
 
 import com.proxybrowser.app.model.ProxyInfo
 import com.proxybrowser.app.model.ProxyType
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.net.InetSocketAddress
@@ -20,25 +21,37 @@ object ProxyTester {
 
     private const val TEST_URL = "https://www.google.com/generate_204"
     private const val TIMEOUT_MS = 500L
-    private const val MAX_CONCURRENT = 30
 
     /**
-     * يفحص قائمة المرشحين على دفعات متوازية، وينادي onResult فوراً
-     * لكل بروكسي شغال (بدون انتظار انتهاء القائمة كاملة).
+     * يفحص كل المرشحين بالتوازي، ويرجع أول بروكسي يستجيب بنجاح
+     * ويوقف باقي الفحص فوراً (بدون انتظار بقية القائمة).
+     * يرجع null إذا ما لقى أي بروكسي شغال بين كل المرشحين.
      */
-    suspend fun testProxies(
-        candidates: List<ProxyInfo>,
-        onResult: suspend (ProxyInfo) -> Unit
-    ) = coroutineScope {
-        candidates.chunked(MAX_CONCURRENT).forEach { chunk ->
-            chunk.map { proxy ->
-                async(Dispatchers.IO) {
-                    testSingle(proxy)
+    suspend fun findFirstWorking(candidates: List<ProxyInfo>): ProxyInfo? = coroutineScope {
+        if (candidates.isEmpty()) return@coroutineScope null
+
+        val found = CompletableDeferred<ProxyInfo?>()
+
+        val jobs = candidates.map { proxy ->
+            launch(Dispatchers.IO) {
+                val result = testSingle(proxy)
+                if (result != null) {
+                    found.complete(result)
                 }
-            }.awaitAll().filterNotNull().forEach { tested ->
-                onResult(tested)
             }
         }
+
+        // إذا خلصت كل المحاولات بدون أي نجاح، نكمل بـ null
+        launch {
+            jobs.joinAll()
+            if (!found.isCompleted) {
+                found.complete(null)
+            }
+        }
+
+        val result = found.await()
+        jobs.forEach { it.cancel() }
+        result
     }
 
     private fun testSingle(proxy: ProxyInfo): ProxyInfo? {

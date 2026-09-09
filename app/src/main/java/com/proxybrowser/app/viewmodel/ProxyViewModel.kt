@@ -1,6 +1,5 @@
 package com.proxybrowser.app.viewmodel
 
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -8,43 +7,44 @@ import com.proxybrowser.app.model.ProxyInfo
 import com.proxybrowser.app.network.ProxyFetcher
 import com.proxybrowser.app.network.ProxyTester
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+sealed class ConnectionState {
+    object Scanning : ConnectionState()
+    data class Connected(val proxy: ProxyInfo) : ConnectionState()
+    object Failed : ConnectionState()
+}
+
 class ProxyViewModel : ViewModel() {
 
-    val workingProxies = mutableStateListOf<ProxyInfo>()
-
-    var isLoading = mutableStateOf(false)
+    var connectionState = mutableStateOf<ConnectionState>(ConnectionState.Scanning)
         private set
 
-    var selectedProxy = mutableStateOf<ProxyInfo?>(null)
-        private set
+    private var scanJob: Job? = null
 
-    fun startScan() {
-        if (isLoading.value) return
-        workingProxies.clear()
-        isLoading.value = true
+    init {
+        scanForFastProxy()
+    }
 
-        viewModelScope.launch {
+    /** يبدأ فحص من جديد ويوقف أي فحص سابق شغال. */
+    fun scanForFastProxy() {
+        scanJob?.cancel()
+        connectionState.value = ConnectionState.Scanning
+
+        scanJob = viewModelScope.launch {
             val candidates = withContext(Dispatchers.IO) {
                 ProxyFetcher.fetchAll()
             }
 
-            ProxyTester.testProxies(candidates) { tested ->
-                workingProxies.add(tested)
-                workingProxies.sortBy { it.latencyMs }
+            val found = ProxyTester.findFirstWorking(candidates)
+
+            connectionState.value = if (found != null) {
+                ConnectionState.Connected(found)
+            } else {
+                ConnectionState.Failed
             }
-
-            isLoading.value = false
         }
-    }
-
-    fun selectProxy(proxy: ProxyInfo) {
-        selectedProxy.value = proxy
-    }
-
-    fun clearSelection() {
-        selectedProxy.value = null
     }
 }

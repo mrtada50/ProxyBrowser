@@ -9,7 +9,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
 import com.proxybrowser.app.ui.BrowserScreen
-import com.proxybrowser.app.ui.ProxyListScreen
+import com.proxybrowser.app.ui.ScanningScreen
+import com.proxybrowser.app.viewmodel.ConnectionState
 import com.proxybrowser.app.viewmodel.ProxyViewModel
 
 class MainActivity : ComponentActivity() {
@@ -21,17 +22,19 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    val selected = viewModel.selectedProxy.value
-                    if (selected == null) {
-                        ProxyListScreen(
-                            viewModel = viewModel,
-                            onProxySelected = { viewModel.selectProxy(it) }
-                        )
-                    } else {
-                        BrowserScreen(
-                            proxy = selected,
-                            onBack = { viewModel.clearSelection() }
-                        )
+                    when (val state = viewModel.connectionState.value) {
+                        is ConnectionState.Scanning -> {
+                            ScanningScreen(failed = false, onRetry = { viewModel.scanForFastProxy() })
+                        }
+                        is ConnectionState.Failed -> {
+                            ScanningScreen(failed = true, onRetry = { viewModel.scanForFastProxy() })
+                        }
+                        is ConnectionState.Connected -> {
+                            BrowserScreen(
+                                proxy = state.proxy,
+                                onProxyLost = { viewModel.scanForFastProxy() }
+                            )
+                        }
                     }
                 }
             }

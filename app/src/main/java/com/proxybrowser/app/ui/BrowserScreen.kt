@@ -1,11 +1,14 @@
 package com.proxybrowser.app.ui
 
 import android.annotation.SuppressLint
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -42,18 +45,24 @@ import java.util.concurrent.Executor
 @Composable
 fun BrowserScreen(
     proxy: ProxyInfo,
-    onBack: () -> Unit
+    onProxyLost: () -> Unit
 ) {
     var urlText by remember { mutableStateOf("https://www.google.com") }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var proxyReady by remember { mutableStateOf(false) }
-    var proxyError by remember { mutableStateOf<String?>(null) }
+    var proxySupported by remember { mutableStateOf(true) }
+    var isProxyOn by remember { mutableStateOf(true) }
+    var connectionLost by remember { mutableStateOf(false) }
 
-    // نفعّل توجيه WebView عبر البروكسي المختار قبل عرض أي صفحة
-    DisposableEffect(proxy) {
+    // يفعّل أو يلغي توجيه WebView عبر البروكسي حسب حالة الزر (تشغيل/إيقاف)
+    DisposableEffect(proxy, isProxyOn) {
         val immediateExecutor = Executor { it.run() }
+        proxyReady = false
 
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+            proxySupported = false
+            proxyReady = true
+        } else if (isProxyOn) {
             val scheme = if (proxy.type == ProxyType.SOCKS5) "socks5" else "http"
             val proxyConfig = ProxyConfig.Builder()
                 .addProxyRule("$scheme://${proxy.host}:${proxy.port}")
@@ -63,7 +72,10 @@ fun BrowserScreen(
                 proxyReady = true
             }
         } else {
-            proxyError = "الجهاز لا يدعم توجيه WebView عبر بروكسي (PROXY_OVERRIDE غير متوفر)"
+            // إيقاف البروكسي = اتصال مباشر بدون أي توجيه
+            ProxyController.getInstance().clearProxyOverride(immediateExecutor) {
+                proxyReady = true
+            }
         }
 
         onDispose {
@@ -78,13 +90,16 @@ fun BrowserScreen(
             Column {
                 TopAppBar(
                     title = {
-                        Text(
-                            "${proxy.host}:${proxy.port}  •  ${proxy.latencyMs} ms",
-                            style = MaterialTheme.typography.titleSmall
-                        )
+                        val status = if (isProxyOn) "${proxy.host}:${proxy.port}  •  ${proxy.latencyMs} ms" else "اتصال مباشر (بدون بروكسي)"
+                        Text(status, style = MaterialTheme.typography.titleSmall)
                     },
-                    navigationIcon = {
-                        TextButton(onClick = onBack) { Text("إغلاق") }
+                    actions = {
+                        TextButton(onClick = {
+                            connectionLost = false
+                            isProxyOn = !isProxyOn
+                        }) {
+                            Text(if (isProxyOn) "إيقاف البروكسي" else "تشغيل البروكسي")
+                        }
                     }
                 )
                 Row(
@@ -118,9 +133,22 @@ fun BrowserScreen(
                 .fillMaxSize()
         ) {
             when {
-                proxyError != null -> {
+                !proxySupported -> {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text(proxyError ?: "")
+                        Text("الجهاز لا يدعم توجيه WebView عبر بروكسي (PROXY_OVERRIDE غير متوفر)")
+                    }
+                }
+                connectionLost -> {
+                    Column(
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Spacer(modifier = Modifier.padding(top = 32.dp))
+                        Text("انقطع البروكسي")
+                        Spacer(modifier = Modifier.padding(4.dp))
+                        TextButton(onClick = onProxyLost) {
+                            Text("إعادة الفحص")
+                        }
                     }
                 }
                 !proxyReady -> {
@@ -139,9 +167,27 @@ fun BrowserScreen(
                                         super.onPageFinished(view, url)
                                         url?.let { urlText = it }
                                     }
+
+                                    override fun onReceivedError(
+                                        view: WebView?,
+                                        request: WebResourceRequest?,
+                                        error: WebResourceError?
+                                    ) {
+                                        super.onReceivedError(view, request, error)
+                                        // نعتبره انقطاع بروكسي فقط إذا كان البروكسي مفعّل
+                                        // وكان الخطأ بالصفحة الرئيسية (مو بمورد فرعي زي صورة)
+                                        if (isProxyOn && request?.isForMainFrame == true) {
+                                            connectionLost = true
+                                        }
+                                    }
                                 }
                                 webViewRef = this
                                 loadUrl(urlText)
+                            }
+                        },
+                        update = { view ->
+                            if (webViewRef !== view) {
+                                webViewRef = view
                             }
                         },
                         modifier = Modifier.fillMaxSize()

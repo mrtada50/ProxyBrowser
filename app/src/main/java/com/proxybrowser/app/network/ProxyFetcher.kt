@@ -18,10 +18,10 @@ object ProxyFetcher {
         .build()
 
     private const val HTTP_URL =
-        "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all"
+        "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=500&country=all&ssl=all&anonymity=all"
 
     private const val SOCKS5_URL =
-        "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=10000&country=all"
+        "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=500&country=all"
 
     /** يجلب كل المرشحين (HTTP + SOCKS5) بدون فحص سرعة بعد. */
     fun fetchAll(): List<ProxyInfo> {
