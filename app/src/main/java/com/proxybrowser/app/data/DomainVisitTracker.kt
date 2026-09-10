@@ -26,6 +26,11 @@ object DomainVisitTracker {
         prefs.edit().putString(KEY_MAP, json.toString()).apply()
     }
 
+    /** يمسح كل سجل الزيارات المحفوظ (يُستخدم مع مسح الكاش والكوكيز اليدوي الكامل). */
+    fun clearAll(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().clear().apply()
+    }
+
     /** يمسح كوكيز/كاش أي دومين ما تمت زيارته من 30 يوم. آمن الاستدعاء من أي خيط. */
     fun cleanupExpired(context: Context) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

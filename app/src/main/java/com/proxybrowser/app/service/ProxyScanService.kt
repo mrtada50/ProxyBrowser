@@ -28,10 +28,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * خدمة أمامية (Foreground Service) تسوي الفحص المستمر بالخلفية:
- * تبدأ بحد سرعة 500ms، وإذا ما لقت بروكسي خلال 10 ثواني ترفع الحد 100ms
- * وتعيد المحاولة تلقائياً بدون توقف لين تلقى بروكسي شغال.
- * تستمر حتى لو المستخدم طلع من شاشة التطبيق، لأنها Foreground Service
- * مع إشعار دائم (مطلوب من أندرويد لأي عمل شبكة مستمر بالخلفية).
+ * تبدأ بحد سرعة 500ms، وإذا ما لقت بروكسي خلال 5 ثواني ترفع الحد 100ms
+ * وتعيد المحاولة تلقائياً. بعد الاتصال يتوقف الفحص تماماً، ولا يعاود إلا
+ * لو انقطع البروكسي (عبر rescan). تتوقف الخدمة نفسها تماماً لما المستخدم
+ * يحذف التطبيق من صفحة التطبيقات المفتوحة (Recents).
  */
 class ProxyScanService : Service() {
 
@@ -58,6 +58,14 @@ class ProxyScanService : Service() {
         return START_STICKY
     }
 
+    /** يوقف كل شي تماماً (الفحص + الخدمة نفسها) لما المستخدم يحذف التطبيق من التطبيقات المفتوحة. */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        scanJob?.cancel()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
     /** يعيد بدء البحث من الصفر (يُستدعى لما ينقطع البروكسي أثناء التصفح). */
     fun rescan() {
         scanJob?.cancel()
@@ -67,6 +75,7 @@ class ProxyScanService : Service() {
 
     private fun startScanLoop() {
         if (scanJob?.isActive == true) return
+        if (ProxyState.connectionState.value is ConnectionState.Connected) return
 
         scanJob = scope.launch {
             var threshold = START_THRESHOLD_MS
@@ -138,6 +147,6 @@ class ProxyScanService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val START_THRESHOLD_MS = 500
         private const val STEP_MS = 100
-        private const val RETRY_WINDOW_MS = 10_000L
+        private const val RETRY_WINDOW_MS = 5_000L
     }
 }

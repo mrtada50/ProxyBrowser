@@ -11,8 +11,10 @@ import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
+import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -250,6 +252,12 @@ fun BrowserScreen(
                                         view: WebView?,
                                         request: WebResourceRequest?
                                     ): WebResourceResponse? {
+                                        // مانحظر الصفحة الرئيسية نفسها أبداً — بس الموارد الفرعية
+                                        // (سكربتات/صور/إطارات إعلانية)، عشان ما تختفي محتويات
+                                        // صفحات كاملة بسبب تطابق خاطئ مع قائمة الحظر
+                                        if (request?.isForMainFrame == true) {
+                                            return super.shouldInterceptRequest(view, request)
+                                        }
                                         AdBlockManager.ensureLoadedSync(context)
                                         val host = request?.url?.host
                                         if (AdBlockManager.isBlocked(host)) {
@@ -299,14 +307,31 @@ fun BrowserScreen(
     if (showSettingsDialog) {
         AlertDialog(
             onDismissRequest = { showSettingsDialog = false },
-            title = { Text("تعديل الصفحة الرئيسية") },
+            title = { Text("الإعدادات") },
             text = {
-                OutlinedTextField(
-                    value = homepageInput,
-                    onValueChange = { homepageInput = it },
-                    singleLine = true,
-                    label = { Text("رابط الصفحة الرئيسية") }
-                )
+                Column {
+                    Text("الصفحة الرئيسية", style = MaterialTheme.typography.labelMedium)
+                    OutlinedTextField(
+                        value = homepageInput,
+                        onValueChange = { homepageInput = it },
+                        singleLine = true,
+                        label = { Text("رابط الصفحة الرئيسية") }
+                    )
+
+                    androidx.compose.foundation.layout.Spacer(modifier = Modifier.padding(top = 16.dp))
+
+                    TextButton(onClick = {
+                        CookieManager.getInstance().removeAllCookies(null)
+                        CookieManager.getInstance().flush()
+                        WebStorage.getInstance().deleteAllData()
+                        webViewRef?.clearCache(true)
+                        webViewRef?.clearHistory()
+                        DomainVisitTracker.clearAll(context)
+                        Toast.makeText(context, "تم مسح كل الكاش والكوكيز", Toast.LENGTH_SHORT).show()
+                    }) {
+                        Text("مسح كل الكاش والكوكيز")
+                    }
+                }
             },
             confirmButton = {
                 TextButton(onClick = {
