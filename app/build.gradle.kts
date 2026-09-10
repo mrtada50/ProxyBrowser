@@ -66,4 +66,7 @@ dependencies {
     // شبكات + فحص البروكسيات
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    // مهام دورية بالخلفية (تنظيف الكوكيز المنتهية + تحديث قائمة حظر الإعلانات)
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
 }
