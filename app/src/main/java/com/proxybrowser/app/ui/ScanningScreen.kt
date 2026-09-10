@@ -2,9 +2,9 @@ package com.proxybrowser.app.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -13,13 +13,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
 /**
- * شاشة انتقالية تظهر أثناء البحث عن بروكسي سريع، أو عند فشل العثور على أي بروكسي.
+ * شاشة انتقالية تظهر أثناء البحث عن بروكسي. البحث تلقائي بالكامل ومستمر
+ * بالخلفية (Foreground Service)، وحد السرعة يرتفع تدريجياً كل 10 ثواني
+ * إذا ما لقى نتيجة، فلا حاجة لأي زر إعادة محاولة يدوي.
  */
 @Composable
-fun ScanningScreen(
-    failed: Boolean,
-    onRetry: () -> Unit
-) {
+fun ScanningScreen(thresholdMs: Int) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -27,16 +26,8 @@ fun ScanningScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        if (failed) {
-            Text("ما لقينا أي بروكسي شغال حالياً")
-            androidx.compose.foundation.layout.Spacer(modifier = Modifier.padding(8.dp))
-            Button(onClick = onRetry) {
-                Text("إعادة المحاولة")
-            }
-        } else {
-            CircularProgressIndicator()
-            androidx.compose.foundation.layout.Spacer(modifier = Modifier.padding(8.dp))
-            Text("جاري البحث عن بروكسي سريع...")
-        }
+        CircularProgressIndicator()
+        Spacer(modifier = Modifier.padding(8.dp))
+        Text("جاري البحث عن بروكسي أسرع من ${thresholdMs}ms...")
     }
 }
