@@ -19,7 +19,6 @@ import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,12 +27,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -50,7 +47,6 @@ import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.AlertDialog
@@ -70,15 +66,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -144,6 +137,7 @@ fun BrowserScreen(
 
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showFavoritesDialog by remember { mutableStateOf(false) }
+    var showTabsDialog by remember { mutableStateOf(false) }
     var homepageInput by remember { mutableStateOf(PrefsManager.getHomepage(context)) }
     var favorites by remember { mutableStateOf(PrefsManager.getFavorites(context)) }
     var pendingDownload by remember { mutableStateOf<PendingDownload?>(null) }
@@ -300,7 +294,9 @@ fun BrowserScreen(
         }
     }
 
-    // إنشاء أول تبويب عند فتح المتصفح لأول مرة
+    // إنشاء أول تبويب عند فتح المتصفح لأول مرة. مهم: هذا يعتمد على وجود
+    // containerRef مسبقاً، لهذا الحاوية (FrameLayout) الحين تُبنى مباشرة
+    // بدون انتظار جاهزية البروكسي (proxyReady) — انظر شجرة الواجهة بالأسفل.
     LaunchedEffect(Unit) {
         if (tabs.isEmpty()) {
             openTab(PrefsManager.getHomepage(context), activate = true)
@@ -370,53 +366,38 @@ fun BrowserScreen(
                     }
                 )
 
-                // شريط التبويبات
-                LazyRow(
+                // شريط عنوان الموقع لوحده — مستطيل مدوّر بعرض الشاشة كامل
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .padding(horizontal = 6.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
                 ) {
-                    items(tabs, key = { it.id }) { tab ->
-                        val isActive = tab.id == activeTabId
-                        Surface(
-                            shape = RoundedCornerShape(16.dp),
-                            color = if (isActive) MaterialTheme.colorScheme.primaryContainer
-                                    else MaterialTheme.colorScheme.surface,
-                            modifier = Modifier
-                                .widthIn(max = 130.dp)
-                                .clickable { switchTab(tab.id) }
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = tab.title.ifBlank { "تبويب" },
-                                    maxLines = 1,
-                                    fontSize = 12.sp,
-                                    modifier = Modifier.widthIn(max = 80.dp)
-                                )
-                                IconButton(
-                                    onClick = { closeTab(tab.id) },
-                                    modifier = Modifier.size(20.dp)
-                                ) {
-                                    Icon(
-                                        Icons.Filled.Close,
-                                        contentDescription = "إغلاق التبويب",
-                                        modifier = Modifier.size(14.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    item {
-                        IconButton(onClick = {
-                            openTab(PrefsManager.getHomepage(context), activate = true)
-                        }) {
-                            Icon(Icons.Filled.Add, contentDescription = "تبويب جديد")
-                        }
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Filled.Language,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.padding(start = 8.dp))
+                        BasicTextField(
+                            value = addressBarText,
+                            onValueChange = { addressBarText = it },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodyMedium.copy(
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            ),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                            keyboardActions = KeyboardActions(onGo = {
+                                activeTab?.webView?.loadUrl(normalizeUrl(addressBarText))
+                            }),
+                            modifier = Modifier.fillMaxWidth()
+                        )
                     }
                 }
 
@@ -427,10 +408,11 @@ fun BrowserScreen(
                     )
                 }
 
+                // صف أزرار التنقل + مربع عدد التبويبات + المفضلة
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 6.dp, vertical = 6.dp),
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     IconButton(onClick = { activeTab?.webView?.goBack() }) {
@@ -449,40 +431,7 @@ fun BrowserScreen(
                         Icon(Icons.Filled.Home, contentDescription = "الرئيسية")
                     }
 
-                    // شريط عنوان الموقع على شكل مستطيل مدوّر (شكل احترافي زي متصفحات الأندرويد المعروفة)
-                    Surface(
-                        shape = RoundedCornerShape(20.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(horizontal = 6.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                Icons.Filled.Language,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(modifier = Modifier.padding(start = 6.dp))
-                            BasicTextField(
-                                value = addressBarText,
-                                onValueChange = { addressBarText = it },
-                                singleLine = true,
-                                textStyle = MaterialTheme.typography.bodyMedium.copy(
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                ),
-                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                                keyboardActions = KeyboardActions(onGo = {
-                                    activeTab?.webView?.loadUrl(normalizeUrl(addressBarText))
-                                }),
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                    }
+                    Spacer(modifier = Modifier.weight(1f))
 
                     IconButton(onClick = {
                         PrefsManager.addFavorite(context, addressBarText)
@@ -496,36 +445,110 @@ fun BrowserScreen(
                     }) {
                         Icon(Icons.Filled.List, contentDescription = "المفضلة")
                     }
+
+                    // مربع صغير فيه رقم عدد التبويبات — الضغط عليه يفتح قائمة التبويبات
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier
+                            .padding(horizontal = 6.dp)
+                            .size(32.dp)
+                            .clickable { showTabsDialog = true }
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(
+                                text = tabs.size.toString(),
+                                fontSize = 14.sp,
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                        }
+                    }
                 }
             }
         }
     ) { padding ->
+        // الحاوية (FrameLayout) تُبنى دائماً بغض النظر عن حالة البروكسي، عشان
+        // ما يصير سباق (race) بين إنشاء أول تبويب وجاهزية الحاوية، وتظهر
+        // حالة التحميل/عدم الدعم كطبقة فوقها بدل ما تمنع إنشاءها من الأساس
         Box(
             modifier = Modifier
                 .padding(padding)
                 .fillMaxSize()
         ) {
-            when {
-                !proxySupported -> {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("الجهاز لا يدعم توجيه WebView عبر بروكسي (PROXY_OVERRIDE غير متوفر)")
-                    }
+            AndroidView(
+                factory = { ctx ->
+                    FrameLayout(ctx).also { containerRef = it }
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+
+            if (!proxySupported) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("الجهاز لا يدعم توجيه WebView عبر بروكسي (PROXY_OVERRIDE غير متوفر)")
                 }
-                !proxyReady -> {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator()
-                    }
-                }
-                else -> {
-                    AndroidView(
-                        factory = { ctx ->
-                            FrameLayout(ctx).also { containerRef = it }
-                        },
-                        modifier = Modifier.fillMaxSize()
-                    )
+            } else if (!proxyReady) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
                 }
             }
         }
+    }
+
+    if (showTabsDialog) {
+        AlertDialog(
+            onDismissRequest = { showTabsDialog = false },
+            title = { Text("التبويبات (${tabs.size})") },
+            text = {
+                LazyColumn {
+                    items(tabs, key = { it.id }) { tab ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                                .clickable {
+                                    switchTab(tab.id)
+                                    showTabsDialog = false
+                                },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = tab.title.ifBlank { "تبويب" },
+                                maxLines = 1,
+                                modifier = Modifier.weight(1f),
+                                style = if (tab.id == activeTabId) {
+                                    MaterialTheme.typography.bodyMedium.copy(
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                } else {
+                                    MaterialTheme.typography.bodyMedium
+                                }
+                            )
+                            IconButton(onClick = { closeTab(tab.id) }) {
+                                Icon(Icons.Filled.Close, contentDescription = "إغلاق التبويب")
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    openTab(PrefsManager.getHomepage(context), activate = true)
+                    showTabsDialog = false
+                }) {
+                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("تبويب جديد")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showTabsDialog = false }) { Text("إغلاق") }
+            }
+        )
     }
 
     if (showSettingsDialog) {
