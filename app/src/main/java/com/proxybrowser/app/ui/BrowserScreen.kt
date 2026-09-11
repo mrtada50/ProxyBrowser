@@ -4,6 +4,8 @@ import android.annotation.SuppressLint
 import android.app.DownloadManager
 import android.net.Uri
 import android.os.Environment
+import android.os.Message
+import android.view.View
 import android.webkit.CookieManager
 import android.webkit.URLUtil
 import android.webkit.WebChromeClient
@@ -14,30 +16,59 @@ import android.webkit.WebSettings
 import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowForward
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -45,9 +76,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.webkit.ProxyConfig
 import androidx.webkit.ProxyController
@@ -58,6 +92,7 @@ import com.proxybrowser.app.data.PrefsManager
 import com.proxybrowser.app.model.ProxyInfo
 import com.proxybrowser.app.model.ProxyType
 import java.util.concurrent.Executor
+import java.util.concurrent.atomic.AtomicInteger
 
 private data class PendingDownload(
     val url: String,
@@ -66,6 +101,27 @@ private data class PendingDownload(
     val mimeType: String,
     val fileName: String
 )
+
+/** حالة تبويب وحد بالمتصفح. */
+private class TabState(val id: Int, initialUrl: String) {
+    var webView: WebView? = null
+    var title by mutableStateOf(initialUrl)
+    var url by mutableStateOf(initialUrl)
+    var canGoBack by mutableStateOf(false)
+    var progress by mutableStateOf(100)
+}
+
+// أخطاء اتصال حقيقية فقط (استبعاد أخطاء الحظر الطبيعية زي حظر الإعلانات
+// أو منع النوافذ المنبثقة، عشان ما تنعتبر خطأ بالبروكسي بالغلط)
+private val PROXY_FAILURE_ERROR_CODES = setOf(
+    WebViewClient.ERROR_CONNECT,
+    WebViewClient.ERROR_HOST_LOOKUP,
+    WebViewClient.ERROR_TIMEOUT,
+    WebViewClient.ERROR_PROXY_AUTHENTICATION,
+    WebViewClient.ERROR_FAILED_SSL_HANDSHAKE
+)
+
+private val nextTabIdCounter = AtomicInteger(1)
 
 @SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalMaterial3Api::class)
@@ -76,14 +132,15 @@ fun BrowserScreen(
 ) {
     val context = LocalContext.current
 
-    var urlText by remember { mutableStateOf(PrefsManager.getHomepage(context)) }
-    var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    val tabs = remember { androidx.compose.runtime.mutableStateListOf<TabState>() }
+    var activeTabId by remember { mutableStateOf(-1) }
+    var containerRef by remember { mutableStateOf<FrameLayout?>(null) }
+    var addressBarText by remember { mutableStateOf("") }
+
     var proxyReady by remember { mutableStateOf(false) }
     var proxySupported by remember { mutableStateOf(true) }
     var isProxyOn by remember { mutableStateOf(true) }
-    var loadProgress by remember { mutableIntStateOf(100) }
     var lostTriggered by remember { mutableStateOf(false) }
-    var canGoBack by remember { mutableStateOf(false) }
 
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showFavoritesDialog by remember { mutableStateOf(false) }
@@ -91,12 +148,171 @@ fun BrowserScreen(
     var favorites by remember { mutableStateOf(PrefsManager.getFavorites(context)) }
     var pendingDownload by remember { mutableStateOf<PendingDownload?>(null) }
 
-    // زر الرجوع بالهاتف يرجع صفحة بالمتصفح إذا فيه صفحات سابقة
-    BackHandler(enabled = canGoBack) {
-        webViewRef?.goBack()
+    val activeTab = tabs.find { it.id == activeTabId }
+
+    fun switchTab(id: Int) {
+        tabs.forEach { it.webView?.visibility = if (it.id == id) View.VISIBLE else View.GONE }
+        activeTabId = id
+        addressBarText = tabs.find { it.id == id }?.url ?: ""
     }
 
-    // يفعّل أو يلغي توجيه WebView عبر البروكسي حسب حالة زر تشغيل/إيقاف
+    fun configureWebView(tab: TabState): WebView {
+        return WebView(context).apply {
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.databaseEnabled = true
+            settings.useWideViewPort = true
+            settings.loadWithOverviewMode = true
+            settings.setSupportZoom(true)
+            settings.builtInZoomControls = true
+            settings.displayZoomControls = false
+            settings.mediaPlaybackRequiresUserGesture = false
+            settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            settings.safeBrowsingEnabled = true
+            settings.javaScriptCanOpenWindowsAutomatically = true
+            settings.setSupportMultipleWindows(true)
+            settings.allowFileAccess = false
+            settings.allowContentAccess = false
+            settings.setGeolocationEnabled(false)
+
+            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+
+            webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    url?.let {
+                        tab.url = it
+                        val pageTitle = view?.title
+                        tab.title = if (!pageTitle.isNullOrBlank()) pageTitle else it
+                        DomainVisitTracker.recordVisit(context, Uri.parse(it).host)
+                        if (tab.id == activeTabId) addressBarText = it
+                    }
+                    tab.canGoBack = view?.canGoBack() == true
+                    CookieManager.getInstance().flush()
+                }
+
+                override fun shouldInterceptRequest(
+                    view: WebView?,
+                    request: WebResourceRequest?
+                ): WebResourceResponse? {
+                    // مانحظر الصفحة الرئيسية أبداً — بس الموارد الفرعية
+                    if (request?.isForMainFrame == true) {
+                        return super.shouldInterceptRequest(view, request)
+                    }
+                    AdBlockManager.ensureLoadedSync(context)
+                    val host = request?.url?.host
+                    if (AdBlockManager.isBlocked(host)) {
+                        return WebResourceResponse("text/plain", "utf-8", null)
+                    }
+                    return super.shouldInterceptRequest(view, request)
+                }
+
+                override fun onReceivedError(
+                    view: WebView?,
+                    request: WebResourceRequest?,
+                    error: WebResourceError?
+                ) {
+                    super.onReceivedError(view, request, error)
+                    // نعيد الفحص فقط عند فشل اتصال حقيقي بالبروكسي، مو عند حظر
+                    // إعلان أو منع نافذة منبثقة أو أي خطأ عادي ثاني
+                    val errorCode = error?.errorCode
+                    if (isProxyOn &&
+                        request?.isForMainFrame == true &&
+                        !lostTriggered &&
+                        errorCode != null &&
+                        errorCode in PROXY_FAILURE_ERROR_CODES
+                    ) {
+                        lostTriggered = true
+                        onProxyLost()
+                    }
+                }
+            }
+
+            webChromeClient = object : WebChromeClient() {
+                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                    super.onProgressChanged(view, newProgress)
+                    tab.progress = newProgress
+                }
+
+                override fun onReceivedTitle(view: WebView?, title: String?) {
+                    super.onReceivedTitle(view, title)
+                    if (!title.isNullOrBlank()) tab.title = title
+                }
+
+                override fun onCreateWindow(
+                    view: WebView?,
+                    isDialog: Boolean,
+                    isUserGesture: Boolean,
+                    resultMsg: Message?
+                ): Boolean {
+                    // نفتح النافذة المنبثقة بتبويب بالخلفية بدون ما نتحول له
+                    val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
+                    val popupTab = TabState(nextTabIdCounter.getAndIncrement(), "")
+                    val popupWebView = configureWebView(popupTab)
+                    popupTab.webView = popupWebView
+                    containerRef?.addView(
+                        popupWebView,
+                        FrameLayout.LayoutParams(
+                            FrameLayout.LayoutParams.MATCH_PARENT,
+                            FrameLayout.LayoutParams.MATCH_PARENT
+                        )
+                    )
+                    popupWebView.visibility = View.GONE
+                    tabs.add(popupTab)
+                    transport.webView = popupWebView
+                    resultMsg.sendToTarget()
+                    return true
+                }
+            }
+
+            setDownloadListener { dUrl, userAgent, contentDisposition, mimeType, _ ->
+                val fileName = URLUtil.guessFileName(dUrl, contentDisposition, mimeType)
+                pendingDownload = PendingDownload(dUrl, userAgent, contentDisposition, mimeType, fileName)
+            }
+        }
+    }
+
+    fun openTab(url: String, activate: Boolean) {
+        val tab = TabState(nextTabIdCounter.getAndIncrement(), url)
+        val webView = configureWebView(tab)
+        tab.webView = webView
+        containerRef?.addView(
+            webView,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        )
+        webView.visibility = View.GONE
+        tabs.add(tab)
+        webView.loadUrl(url)
+        if (activate) switchTab(tab.id)
+    }
+
+    fun closeTab(id: Int) {
+        if (tabs.size <= 1) return
+        val index = tabs.indexOfFirst { it.id == id }
+        if (index < 0) return
+        val tab = tabs[index]
+        containerRef?.removeView(tab.webView)
+        tab.webView?.destroy()
+        tabs.removeAt(index)
+        if (activeTabId == id) {
+            val newActive = tabs.getOrNull((index - 1).coerceAtLeast(0)) ?: tabs.firstOrNull()
+            newActive?.let { switchTab(it.id) }
+        }
+    }
+
+    // إنشاء أول تبويب عند فتح المتصفح لأول مرة
+    LaunchedEffect(Unit) {
+        if (tabs.isEmpty()) {
+            openTab(PrefsManager.getHomepage(context), activate = true)
+        }
+    }
+
+    // زر الرجوع بالهاتف يرجع صفحة بالتبويب الحالي إذا فيه صفحات سابقة
+    BackHandler(enabled = activeTab?.canGoBack == true) {
+        activeTab?.webView?.goBack()
+    }
+
+    // يفعّل أو يلغي توجيه WebView عبر البروكسي حسب حالة زر تشغيل/إيقاف (يشمل كل التبويبات)
     DisposableEffect(proxy, isProxyOn) {
         val immediateExecutor = Executor { it.run() }
         proxyReady = false
@@ -132,23 +348,81 @@ fun BrowserScreen(
                 TopAppBar(
                     title = {
                         val status = if (isProxyOn) {
-                            "${proxy.host}:${proxy.port}  •  ${proxy.latencyMs} ms"
+                            "${proxy.host}:${proxy.port} • ${proxy.latencyMs}ms"
                         } else {
-                            "اتصال مباشر (بدون بروكسي)"
+                            "اتصال مباشر"
                         }
                         Text(status, style = MaterialTheme.typography.titleSmall)
                     },
                     actions = {
-                        TextButton(onClick = { isProxyOn = !isProxyOn }) {
-                            Text(if (isProxyOn) "إيقاف البروكسي" else "تشغيل البروكسي")
+                        IconButton(onClick = { isProxyOn = !isProxyOn }) {
+                            Icon(
+                                imageVector = if (isProxyOn) Icons.Filled.Wifi else Icons.Filled.WifiOff,
+                                contentDescription = if (isProxyOn) "إيقاف البروكسي" else "تشغيل البروكسي"
+                            )
+                        }
+                        IconButton(onClick = {
+                            homepageInput = PrefsManager.getHomepage(context)
+                            showSettingsDialog = true
+                        }) {
+                            Icon(Icons.Filled.Settings, contentDescription = "الإعدادات")
                         }
                     }
                 )
 
-                // شريط تقدم تحميل الصفحة الحالية
-                if (loadProgress in 1..99) {
+                // شريط التبويبات
+                LazyRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .padding(horizontal = 6.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    items(tabs, key = { it.id }) { tab ->
+                        val isActive = tab.id == activeTabId
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = if (isActive) MaterialTheme.colorScheme.primaryContainer
+                                    else MaterialTheme.colorScheme.surface,
+                            modifier = Modifier
+                                .widthIn(max = 130.dp)
+                                .clickable { switchTab(tab.id) }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = tab.title.ifBlank { "تبويب" },
+                                    maxLines = 1,
+                                    fontSize = 12.sp,
+                                    modifier = Modifier.widthIn(max = 80.dp)
+                                )
+                                IconButton(
+                                    onClick = { closeTab(tab.id) },
+                                    modifier = Modifier.size(20.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Close,
+                                        contentDescription = "إغلاق التبويب",
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    item {
+                        IconButton(onClick = {
+                            openTab(PrefsManager.getHomepage(context), activate = true)
+                        }) {
+                            Icon(Icons.Filled.Add, contentDescription = "تبويب جديد")
+                        }
+                    }
+                }
+
+                if ((activeTab?.progress ?: 100) in 1..99) {
                     LinearProgressIndicator(
-                        progress = { loadProgress / 100f },
+                        progress = { (activeTab?.progress ?: 100) / 100f },
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
@@ -156,41 +430,72 @@ fun BrowserScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 2.dp, vertical = 4.dp),
+                        .padding(horizontal = 6.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    TextButton(onClick = { webViewRef?.goBack() }) { Text("<") }
-                    TextButton(onClick = { webViewRef?.goForward() }) { Text(">") }
-                    TextButton(onClick = { webViewRef?.reload() }) { Text("⟳") }
-                    TextButton(onClick = {
+                    IconButton(onClick = { activeTab?.webView?.goBack() }) {
+                        Icon(Icons.Filled.ArrowBack, contentDescription = "رجوع")
+                    }
+                    IconButton(onClick = { activeTab?.webView?.goForward() }) {
+                        Icon(Icons.Filled.ArrowForward, contentDescription = "تقدم")
+                    }
+                    IconButton(onClick = { activeTab?.webView?.reload() }) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "تحديث")
+                    }
+                    IconButton(onClick = {
                         val home = PrefsManager.getHomepage(context)
-                        urlText = home
-                        webViewRef?.loadUrl(home)
-                    }) { Text("🏠") }
-                    OutlinedTextField(
-                        value = urlText,
-                        onValueChange = { urlText = it },
-                        singleLine = true,
+                        activeTab?.webView?.loadUrl(home)
+                    }) {
+                        Icon(Icons.Filled.Home, contentDescription = "الرئيسية")
+                    }
+
+                    // شريط عنوان الموقع على شكل مستطيل مدوّر (شكل احترافي زي متصفحات الأندرويد المعروفة)
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
                         modifier = Modifier
                             .weight(1f)
-                            .padding(start = 4.dp),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                        keyboardActions = KeyboardActions(onGo = {
-                            webViewRef?.loadUrl(normalizeUrl(urlText))
-                        })
-                    )
-                    TextButton(onClick = {
-                        PrefsManager.addFavorite(context, urlText)
+                            .padding(horizontal = 6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Filled.Language,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.padding(start = 6.dp))
+                            BasicTextField(
+                                value = addressBarText,
+                                onValueChange = { addressBarText = it },
+                                singleLine = true,
+                                textStyle = MaterialTheme.typography.bodyMedium.copy(
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                ),
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                                keyboardActions = KeyboardActions(onGo = {
+                                    activeTab?.webView?.loadUrl(normalizeUrl(addressBarText))
+                                }),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    }
+
+                    IconButton(onClick = {
+                        PrefsManager.addFavorite(context, addressBarText)
                         favorites = PrefsManager.getFavorites(context)
-                    }) { Text("⭐") }
-                    TextButton(onClick = {
+                    }) {
+                        Icon(Icons.Filled.Star, contentDescription = "إضافة للمفضلة")
+                    }
+                    IconButton(onClick = {
                         favorites = PrefsManager.getFavorites(context)
                         showFavoritesDialog = true
-                    }) { Text("☰") }
-                    TextButton(onClick = {
-                        homepageInput = PrefsManager.getHomepage(context)
-                        showSettingsDialog = true
-                    }) { Text("⚙") }
+                    }) {
+                        Icon(Icons.Filled.List, contentDescription = "المفضلة")
+                    }
                 }
             }
         }
@@ -214,88 +519,7 @@ fun BrowserScreen(
                 else -> {
                     AndroidView(
                         factory = { ctx ->
-                            WebView(ctx).apply {
-                                // إعدادات التوافق: فتح كل أنواع الصفحات وتناسقها مع حجم الشاشة
-                                settings.javaScriptEnabled = true
-                                settings.domStorageEnabled = true
-                                settings.databaseEnabled = true
-                                settings.useWideViewPort = true
-                                settings.loadWithOverviewMode = true
-                                settings.setSupportZoom(true)
-                                settings.builtInZoomControls = true
-                                settings.displayZoomControls = false
-                                settings.mediaPlaybackRequiresUserGesture = false
-                                settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-
-                                // تشديد الحماية
-                                settings.safeBrowsingEnabled = true
-                                settings.javaScriptCanOpenWindowsAutomatically = false
-                                settings.setSupportMultipleWindows(false)
-                                settings.allowFileAccess = false
-                                settings.allowContentAccess = false
-                                settings.setGeolocationEnabled(false)
-
-                                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-
-                                webViewClient = object : WebViewClient() {
-                                    override fun onPageFinished(view: WebView?, url: String?) {
-                                        super.onPageFinished(view, url)
-                                        url?.let {
-                                            urlText = it
-                                            DomainVisitTracker.recordVisit(context, Uri.parse(it).host)
-                                        }
-                                        canGoBack = view?.canGoBack() == true
-                                        CookieManager.getInstance().flush()
-                                    }
-
-                                    override fun shouldInterceptRequest(
-                                        view: WebView?,
-                                        request: WebResourceRequest?
-                                    ): WebResourceResponse? {
-                                        // مانحظر الصفحة الرئيسية نفسها أبداً — بس الموارد الفرعية
-                                        // (سكربتات/صور/إطارات إعلانية)، عشان ما تختفي محتويات
-                                        // صفحات كاملة بسبب تطابق خاطئ مع قائمة الحظر
-                                        if (request?.isForMainFrame == true) {
-                                            return super.shouldInterceptRequest(view, request)
-                                        }
-                                        AdBlockManager.ensureLoadedSync(context)
-                                        val host = request?.url?.host
-                                        if (AdBlockManager.isBlocked(host)) {
-                                            return WebResourceResponse("text/plain", "utf-8", null)
-                                        }
-                                        return super.shouldInterceptRequest(view, request)
-                                    }
-
-                                    override fun onReceivedError(
-                                        view: WebView?,
-                                        request: WebResourceRequest?,
-                                        error: WebResourceError?
-                                    ) {
-                                        super.onReceivedError(view, request, error)
-                                        // إذا انقطع البروكسي بصفحة رئيسية، نعيد الفحص تلقائياً
-                                        if (isProxyOn && request?.isForMainFrame == true && !lostTriggered) {
-                                            lostTriggered = true
-                                            onProxyLost()
-                                        }
-                                    }
-                                }
-
-                                webChromeClient = object : WebChromeClient() {
-                                    override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                                        super.onProgressChanged(view, newProgress)
-                                        loadProgress = newProgress
-                                    }
-                                }
-
-                                // أي تنزيل ملف يحتاج تأكيد صريح من المستخدم قبل ما يصير
-                                setDownloadListener { dUrl, userAgent, contentDisposition, mimeType, _ ->
-                                    val fileName = URLUtil.guessFileName(dUrl, contentDisposition, mimeType)
-                                    pendingDownload = PendingDownload(dUrl, userAgent, contentDisposition, mimeType, fileName)
-                                }
-
-                                webViewRef = this
-                                loadUrl(urlText)
-                            }
+                            FrameLayout(ctx).also { containerRef = it }
                         },
                         modifier = Modifier.fillMaxSize()
                     )
@@ -318,14 +542,14 @@ fun BrowserScreen(
                         label = { Text("رابط الصفحة الرئيسية") }
                     )
 
-                    androidx.compose.foundation.layout.Spacer(modifier = Modifier.padding(top = 16.dp))
+                    Spacer(modifier = Modifier.padding(top = 16.dp))
 
                     TextButton(onClick = {
                         CookieManager.getInstance().removeAllCookies(null)
                         CookieManager.getInstance().flush()
                         WebStorage.getInstance().deleteAllData()
-                        webViewRef?.clearCache(true)
-                        webViewRef?.clearHistory()
+                        activeTab?.webView?.clearCache(true)
+                        activeTab?.webView?.clearHistory()
                         DomainVisitTracker.clearAll(context)
                         Toast.makeText(context, "تم مسح كل الكاش والكوكيز", Toast.LENGTH_SHORT).show()
                     }) {
@@ -369,8 +593,7 @@ fun BrowserScreen(
                                     style = MaterialTheme.typography.bodySmall
                                 )
                                 TextButton(onClick = {
-                                    urlText = fav
-                                    webViewRef?.loadUrl(fav)
+                                    activeTab?.webView?.loadUrl(fav)
                                     showFavoritesDialog = false
                                 }) { Text("فتح") }
                                 TextButton(onClick = {
