@@ -47,6 +47,7 @@ import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.AlertDialog
@@ -84,6 +85,7 @@ import com.proxybrowser.app.data.DomainVisitTracker
 import com.proxybrowser.app.data.PrefsManager
 import com.proxybrowser.app.model.ProxyInfo
 import com.proxybrowser.app.model.ProxyType
+import java.net.URLEncoder
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -396,8 +398,25 @@ fun BrowserScreen(
                             keyboardActions = KeyboardActions(onGo = {
                                 activeTab?.webView?.loadUrl(normalizeUrl(addressBarText))
                             }),
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .weight(1f)
                         )
+                        IconButton(
+                            onClick = {
+                                val current = activeTab?.url
+                                if (!current.isNullOrBlank()) {
+                                    activeTab?.webView?.loadUrl(buildGoogleTranslateUrl(current))
+                                }
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                Icons.Filled.Translate,
+                                contentDescription = "ترجمة الصفحة",
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
 
@@ -669,6 +688,13 @@ private fun startDownload(context: android.content.Context, dl: PendingDownload)
     } catch (e: Exception) {
         // تجاهل فشل التنزيل (مثلاً اسم ملف غير صالح أو رابط غير مدعوم)
     }
+}
+
+private fun buildGoogleTranslateUrl(originalUrl: String): String {
+    val encoded = URLEncoder.encode(originalUrl, "UTF-8")
+    // نستخدم خدمة ترجمة جوجل كوسيط (بدون مفتاح API) — تجيب الصفحة وتترجمها
+    // للعربية تلقائياً. الرجوع للصفحة الأصلية يصير بزر الرجوع العادي بالمتصفح.
+    return "https://translate.google.com/translate?sl=auto&tl=ar&u=$encoded"
 }
 
 private fun normalizeUrl(input: String): String {
