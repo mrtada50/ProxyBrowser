@@ -2,11 +2,15 @@ package com.proxybrowser.app.ui
 
 import android.annotation.SuppressLint
 import android.app.DownloadManager
+import android.content.Intent
 import android.net.Uri
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.os.Message
 import android.view.View
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.URLUtil
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -44,6 +48,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
@@ -104,6 +109,38 @@ private class TabState(val id: Int, initialUrl: String) {
     var url by mutableStateOf(initialUrl)
     var canGoBack by mutableStateOf(false)
     var progress by mutableStateOf(100)
+    var mediaLinks by mutableStateOf<List<String>>(emptyList())
+}
+
+// سكربت يفحص الصفحة الحالية عن وسوم فيديو/صوت ويجمع روابطها
+private const val MEDIA_SCAN_JS = """
+(function() {
+    try {
+        var urls = [];
+        document.querySelectorAll('video, audio').forEach(function(el) {
+            if (el.src) urls.push(el.src);
+            el.querySelectorAll('source').forEach(function(s) {
+                if (s.src) urls.push(s.src);
+            });
+        });
+        urls = urls.filter(function(v, i) { return urls.indexOf(v) === i; });
+        AndroidMedia.onMediaFound(JSON.stringify(urls));
+    } catch (e) {}
+})();
+"""
+
+/** جسر JavaScript بسيط يستقبل روابط الوسائط المكتشفة بالصفحة فقط (بدون أي صلاحيات ثانية). */
+private class MediaBridge(private val onFound: (List<String>) -> Unit) {
+    @JavascriptInterface
+    fun onMediaFound(json: String) {
+        val list = try {
+            val arr = org.json.JSONArray(json)
+            (0 until arr.length()).map { arr.getString(it) }
+        } catch (e: Exception) {
+            emptyList()
+        }
+        Handler(Looper.getMainLooper()).post { onFound(list) }
+    }
 }
 
 // أخطاء اتصال حقيقية فقط (استبعاد أخطاء الحظر الطبيعية زي حظر الإعلانات
@@ -140,6 +177,7 @@ fun BrowserScreen(
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showFavoritesDialog by remember { mutableStateOf(false) }
     var showTabsDialog by remember { mutableStateOf(false) }
+    var showMediaDialog by remember { mutableStateOf(false) }
     var homepageInput by remember { mutableStateOf(PrefsManager.getHomepage(context)) }
     var favorites by remember { mutableStateOf(PrefsManager.getFavorites(context)) }
     var pendingDownload by remember { mutableStateOf<PendingDownload?>(null) }
@@ -173,6 +211,11 @@ fun BrowserScreen(
 
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
+            addJavascriptInterface(
+                MediaBridge { links -> tab.mediaLinks = links },
+                "AndroidMedia"
+            )
+
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
@@ -184,6 +227,8 @@ fun BrowserScreen(
                         if (tab.id == activeTabId) addressBarText = it
                     }
                     tab.canGoBack = view?.canGoBack() == true
+                    tab.mediaLinks = emptyList()
+                    view?.evaluateJavascript(MEDIA_SCAN_JS, null)
                     CookieManager.getInstance().flush()
                 }
 
@@ -452,6 +497,16 @@ fun BrowserScreen(
 
                     Spacer(modifier = Modifier.weight(1f))
 
+                    if ((activeTab?.mediaLinks?.size ?: 0) > 0) {
+                        IconButton(onClick = { showMediaDialog = true }) {
+                            Icon(
+                                Icons.Filled.PlayCircle,
+                                contentDescription = "مقاطع مكتشفة بالصفحة",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+
                     IconButton(onClick = {
                         PrefsManager.addFavorite(context, addressBarText)
                         favorites = PrefsManager.getFavorites(context)
@@ -570,6 +625,45 @@ fun BrowserScreen(
         )
     }
 
+    if (showMediaDialog) {
+        val links = activeTab?.mediaLinks ?: emptyList()
+        AlertDialog(
+            onDismissRequest = { showMediaDialog = false },
+            title = { Text("مقاطع بالصفحة (${links.size})") },
+            text = {
+                if (links.isEmpty()) {
+                    Text("ما فيه مقاطع مكتشفة حالياً بهذي الصفحة")
+                } else {
+                    LazyColumn {
+                        items(links) { link ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = link,
+                                    maxLines = 1,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(end = 8.dp),
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                TextButton(onClick = {
+                                    openWithExternalPlayer(context, link)
+                                }) { Text("فتح خارجي") }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showMediaDialog = false }) { Text("إغلاق") }
+            }
+        )
+    }
+
     if (showSettingsDialog) {
         AlertDialog(
             onDismissRequest = { showSettingsDialog = false },
@@ -670,6 +764,29 @@ fun BrowserScreen(
                 TextButton(onClick = { pendingDownload = null }) { Text("رفض") }
             }
         )
+    }
+}
+
+private fun openWithExternalPlayer(context: android.content.Context, url: String) {
+    try {
+        val mime = when {
+            url.contains(".m3u8", ignoreCase = true) -> "application/x-mpegURL"
+            url.endsWith(".mp4", ignoreCase = true) -> "video/mp4"
+            url.endsWith(".webm", ignoreCase = true) -> "video/webm"
+            url.endsWith(".mkv", ignoreCase = true) -> "video/x-matroska"
+            url.endsWith(".mp3", ignoreCase = true) -> "audio/mpeg"
+            url.endsWith(".m4a", ignoreCase = true) -> "audio/mp4"
+            else -> "video/*"
+        }
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(Uri.parse(url), mime)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(Intent.createChooser(intent, "افتح المقطع باستخدام").apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        })
+    } catch (e: Exception) {
+        Toast.makeText(context, "ما فيه تطبيق يقدر يفتح هذا المقطع", Toast.LENGTH_SHORT).show()
     }
 }
 
