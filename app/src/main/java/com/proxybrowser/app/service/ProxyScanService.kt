@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.proxybrowser.app.MainActivity
+import com.proxybrowser.app.data.ProxyHistoryManager
 import com.proxybrowser.app.model.ProxyInfo
 import com.proxybrowser.app.network.ProxyFetcher
 import com.proxybrowser.app.network.ProxyTester
@@ -85,12 +86,22 @@ class ProxyScanService : Service() {
                 ProxyState.connectionState.value = ConnectionState.Scanning(threshold)
                 updateNotification("جاري البحث... الحد الحالي ${threshold}ms")
 
-                val candidates = withContext(Dispatchers.IO) {
-                    ProxyFetcher.fetchAll(threshold)
+                // نجرب البروكسيات اللي اشتغلت زين سابقاً أول (أسرع اتصال)
+                val recentGood = ProxyHistoryManager.getRecent(applicationContext)
+                if (recentGood.isNotEmpty()) {
+                    found = withTimeoutOrNull(RETRY_WINDOW_MS) {
+                        ProxyTester.findFirstWorking(recentGood, threshold)
+                    }
                 }
 
-                found = withTimeoutOrNull(RETRY_WINDOW_MS) {
-                    ProxyTester.findFirstWorking(candidates, threshold)
+                if (found == null) {
+                    val candidates = withContext(Dispatchers.IO) {
+                        ProxyFetcher.fetchAll(threshold)
+                    }
+
+                    found = withTimeoutOrNull(RETRY_WINDOW_MS) {
+                        ProxyTester.findFirstWorking(candidates, threshold)
+                    }
                 }
 
                 if (found == null) {
@@ -99,6 +110,7 @@ class ProxyScanService : Service() {
             }
 
             val connectedProxy = found ?: return@launch
+            ProxyHistoryManager.recordSuccess(applicationContext, connectedProxy)
             ProxyState.connectionState.value = ConnectionState.Connected(connectedProxy)
             updateNotification("متصل: ${connectedProxy.host}:${connectedProxy.port} • ${connectedProxy.latencyMs}ms")
         }

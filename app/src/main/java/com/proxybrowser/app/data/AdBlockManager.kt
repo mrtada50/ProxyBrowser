@@ -73,6 +73,23 @@ object AdBlockManager {
         return false
     }
 
+    private const val KEY_WHITELIST = "site_whitelist"
+
+    fun isSiteWhitelisted(context: Context, host: String?): Boolean {
+        if (host.isNullOrBlank()) return false
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getStringSet(KEY_WHITELIST, emptySet())?.contains(host.lowercase()) == true
+    }
+
+    fun toggleSiteWhitelist(context: Context, host: String?) {
+        if (host.isNullOrBlank()) return
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val current = prefs.getStringSet(KEY_WHITELIST, emptySet())?.toMutableSet() ?: mutableSetOf()
+        val key = host.lowercase()
+        if (current.contains(key)) current.remove(key) else current.add(key)
+        prefs.edit().putStringSet(KEY_WHITELIST, current).apply()
+    }
+
     fun shouldRefresh(context: Context): Boolean {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val last = prefs.getLong(KEY_LAST_UPDATE, 0L)

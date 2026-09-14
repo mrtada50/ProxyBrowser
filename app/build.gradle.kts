@@ -70,4 +70,7 @@ dependencies {
 
     // مهام دورية بالخلفية (تنظيف الكوكيز المنتهية + تحديث قائمة حظر الإعلانات)
     implementation("androidx.work:work-runtime-ktx:2.9.1")
+
+    // سحب للتحديث
+    implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
 }

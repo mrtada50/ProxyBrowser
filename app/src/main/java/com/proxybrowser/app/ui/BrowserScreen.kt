@@ -2,6 +2,8 @@ package com.proxybrowser.app.ui
 
 import android.annotation.SuppressLint
 import android.app.DownloadManager
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Environment
@@ -11,6 +13,7 @@ import android.os.Message
 import android.view.View
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.PermissionRequest
 import android.webkit.URLUtil
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -24,6 +27,7 @@ import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,18 +49,27 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -71,6 +84,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -78,18 +92,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import androidx.webkit.ProxyConfig
 import androidx.webkit.ProxyController
 import androidx.webkit.WebViewFeature
 import com.proxybrowser.app.data.AdBlockManager
 import com.proxybrowser.app.data.DomainVisitTracker
+import com.proxybrowser.app.data.FavoriteItem
+import com.proxybrowser.app.data.HistoryEntry
+import com.proxybrowser.app.data.HistoryManager
 import com.proxybrowser.app.data.PrefsManager
 import com.proxybrowser.app.model.ProxyInfo
 import com.proxybrowser.app.model.ProxyType
+import com.proxybrowser.app.state.ThemeState
 import java.net.URLEncoder
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicInteger
@@ -102,6 +122,9 @@ private data class PendingDownload(
     val fileName: String
 )
 
+private const val DESKTOP_USER_AGENT =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
 /** حالة تبويب وحد بالمتصفح. */
 private class TabState(val id: Int, initialUrl: String) {
     var webView: WebView? = null
@@ -110,6 +133,9 @@ private class TabState(val id: Int, initialUrl: String) {
     var canGoBack by mutableStateOf(false)
     var progress by mutableStateOf(100)
     var mediaLinks by mutableStateOf<List<String>>(emptyList())
+    var desktopMode by mutableStateOf(false)
+    var readerMode by mutableStateOf(false)
+    var groupName by mutableStateOf<String?>(null)
 }
 
 // سكربت يفحص الصفحة الحالية عن وسوم فيديو/صوت ويجمع روابطها
@@ -125,6 +151,23 @@ private const val MEDIA_SCAN_JS = """
         });
         urls = urls.filter(function(v, i) { return urls.indexOf(v) === i; });
         AndroidMedia.onMediaFound(JSON.stringify(urls));
+    } catch (e) {}
+})();
+"""
+
+// سكربت وضع القراءة: يبسّط شكل الصفحة (خط أكبر، عرض مريح، إخفاء عناصر جانبية شائعة)
+private const val READER_MODE_JS = """
+(function() {
+    try {
+        var old = document.getElementById('proxybrowser-reader-style');
+        if (old) old.remove();
+        var style = document.createElement('style');
+        style.id = 'proxybrowser-reader-style';
+        style.innerHTML = 'body{max-width:700px !important;margin:0 auto !important;padding:16px !important;' +
+            'font-size:20px !important;line-height:1.7 !important;background:#fdfdfd !important;color:#111 !important;}' +
+            'img,video{max-width:100% !important;height:auto !important;}' +
+            'nav,header,footer,aside,.ad,.ads,.advert,.advertisement,.sidebar,.comments,.comment,.related,.share,.social{display:none !important;}';
+        document.head.appendChild(style);
     } catch (e) {}
 })();
 """
@@ -155,6 +198,12 @@ private val PROXY_FAILURE_ERROR_CODES = setOf(
 
 private val nextTabIdCounter = AtomicInteger(1)
 
+private fun permissionLabel(resource: String): String = when (resource) {
+    PermissionRequest.RESOURCE_VIDEO_CAPTURE -> "الكاميرا"
+    PermissionRequest.RESOURCE_AUDIO_CAPTURE -> "المايكروفون"
+    else -> resource
+}
+
 @SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -167,6 +216,7 @@ fun BrowserScreen(
     val tabs = remember { androidx.compose.runtime.mutableStateListOf<TabState>() }
     var activeTabId by remember { mutableStateOf(-1) }
     var containerRef by remember { mutableStateOf<FrameLayout?>(null) }
+    var swipeRefreshRef by remember { mutableStateOf<SwipeRefreshLayout?>(null) }
     var addressBarText by remember { mutableStateOf("") }
 
     var proxyReady by remember { mutableStateOf(false) }
@@ -176,11 +226,26 @@ fun BrowserScreen(
 
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showFavoritesDialog by remember { mutableStateOf(false) }
+    var showHistoryDialog by remember { mutableStateOf(false) }
     var showTabsDialog by remember { mutableStateOf(false) }
     var showMediaDialog by remember { mutableStateOf(false) }
+    var showOverflowMenu by remember { mutableStateOf(false) }
     var homepageInput by remember { mutableStateOf(PrefsManager.getHomepage(context)) }
     var favorites by remember { mutableStateOf(PrefsManager.getFavorites(context)) }
+    var historyItems by remember { mutableStateOf(HistoryManager.getAll(context)) }
+    var favoritesQuery by remember { mutableStateOf("") }
+    var historyQuery by remember { mutableStateOf("") }
+    var editingFavorite by remember { mutableStateOf<FavoriteItem?>(null) }
+    var editTitleInput by remember { mutableStateOf("") }
+    var editUrlInput by remember { mutableStateOf("") }
+    var textZoomInput by remember { mutableStateOf(PrefsManager.getTextZoom(context)) }
     var pendingDownload by remember { mutableStateOf<PendingDownload?>(null) }
+    var pendingPermission by remember { mutableStateOf<PermissionRequest?>(null) }
+    var longPressUrl by remember { mutableStateOf<String?>(null) }
+    var groupEditTab by remember { mutableStateOf<TabState?>(null) }
+    var groupNameInput by remember { mutableStateOf("") }
+
+    val isDarkTheme by ThemeState.isDarkTheme.collectAsState()
 
     val activeTab = tabs.find { it.id == activeTabId }
 
@@ -208,6 +273,7 @@ fun BrowserScreen(
             settings.allowFileAccess = false
             settings.allowContentAccess = false
             settings.setGeolocationEnabled(false)
+            settings.textZoom = PrefsManager.getTextZoom(context)
 
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
@@ -216,20 +282,38 @@ fun BrowserScreen(
                 "AndroidMedia"
             )
 
+            setOnLongClickListener {
+                val result = hitTestResult
+                val type = result.type
+                if (type == android.webkit.WebView.HitTestResult.SRC_ANCHOR_TYPE ||
+                    type == android.webkit.WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
+                ) {
+                    longPressUrl = result.extra
+                    true
+                } else {
+                    false
+                }
+            }
+
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
                     url?.let {
                         tab.url = it
                         val pageTitle = view?.title
-                        tab.title = if (!pageTitle.isNullOrBlank()) pageTitle else it
+                        val finalTitle = if (!pageTitle.isNullOrBlank()) pageTitle else it
+                        tab.title = finalTitle
                         DomainVisitTracker.recordVisit(context, Uri.parse(it).host)
+                        HistoryManager.add(context, finalTitle, it)
+                        historyItems = HistoryManager.getAll(context)
                         if (tab.id == activeTabId) addressBarText = it
                     }
                     tab.canGoBack = view?.canGoBack() == true
                     tab.mediaLinks = emptyList()
                     view?.evaluateJavascript(MEDIA_SCAN_JS, null)
+                    if (tab.readerMode) view?.evaluateJavascript(READER_MODE_JS, null)
                     CookieManager.getInstance().flush()
+                    swipeRefreshRef?.isRefreshing = false
                 }
 
                 override fun shouldInterceptRequest(
@@ -238,6 +322,10 @@ fun BrowserScreen(
                 ): WebResourceResponse? {
                     // مانحظر الصفحة الرئيسية أبداً — بس الموارد الفرعية
                     if (request?.isForMainFrame == true) {
+                        return super.shouldInterceptRequest(view, request)
+                    }
+                    val pageHost = Uri.parse(tab.url).host
+                    if (AdBlockManager.isSiteWhitelisted(context, pageHost)) {
                         return super.shouldInterceptRequest(view, request)
                     }
                     AdBlockManager.ensureLoadedSync(context)
@@ -278,6 +366,11 @@ fun BrowserScreen(
                 override fun onReceivedTitle(view: WebView?, title: String?) {
                     super.onReceivedTitle(view, title)
                     if (!title.isNullOrBlank()) tab.title = title
+                }
+
+                override fun onPermissionRequest(request: PermissionRequest?) {
+                    if (request == null) return
+                    pendingPermission = request
                 }
 
                 override fun onCreateWindow(
@@ -339,6 +432,34 @@ fun BrowserScreen(
             val newActive = tabs.getOrNull((index - 1).coerceAtLeast(0)) ?: tabs.firstOrNull()
             newActive?.let { switchTab(it.id) }
         }
+    }
+
+    fun toggleDesktopMode() {
+        val tab = activeTab ?: return
+        tab.desktopMode = !tab.desktopMode
+        tab.webView?.settings?.userAgentString = if (tab.desktopMode) DESKTOP_USER_AGENT else null
+        tab.webView?.reload()
+    }
+
+    fun toggleReaderMode() {
+        val tab = activeTab ?: return
+        tab.readerMode = !tab.readerMode
+        if (tab.readerMode) {
+            tab.webView?.evaluateJavascript(READER_MODE_JS, null)
+        } else {
+            tab.webView?.reload()
+        }
+    }
+
+    fun shareCurrentUrl() {
+        val url = activeTab?.url ?: return
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, url)
+        }
+        context.startActivity(Intent.createChooser(intent, "مشاركة الرابط").apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        })
     }
 
     // إنشاء أول تبويب عند فتح المتصفح لأول مرة. مهم: هذا يعتمد على وجود
@@ -406,9 +527,67 @@ fun BrowserScreen(
                         }
                         IconButton(onClick = {
                             homepageInput = PrefsManager.getHomepage(context)
+                            textZoomInput = PrefsManager.getTextZoom(context)
                             showSettingsDialog = true
                         }) {
                             Icon(Icons.Filled.Settings, contentDescription = "الإعدادات")
+                        }
+
+                        Box {
+                            IconButton(onClick = { showOverflowMenu = true }) {
+                                Icon(Icons.Filled.MoreVert, contentDescription = "المزيد")
+                            }
+                            DropdownMenu(
+                                expanded = showOverflowMenu,
+                                onDismissRequest = { showOverflowMenu = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("مشاركة الرابط") },
+                                    leadingIcon = { Icon(Icons.Filled.Share, contentDescription = null) },
+                                    onClick = { showOverflowMenu = false; shareCurrentUrl() }
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(if (activeTab?.desktopMode == true) "✓ نسخة سطح المكتب" else "نسخة سطح المكتب")
+                                    },
+                                    onClick = { showOverflowMenu = false; toggleDesktopMode() }
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(if (activeTab?.readerMode == true) "✓ وضع القراءة" else "وضع القراءة")
+                                    },
+                                    onClick = { showOverflowMenu = false; toggleReaderMode() }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("سجل التصفح") },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        historyItems = HistoryManager.getAll(context)
+                                        showHistoryDialog = true
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        val host = activeTab?.url?.let { Uri.parse(it).host }
+                                        val whitelisted = AdBlockManager.isSiteWhitelisted(context, host)
+                                        Text(if (whitelisted) "✓ تعطيل حظر الإعلانات لهذا الموقع" else "تعطيل حظر الإعلانات لهذا الموقع")
+                                    },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        val host = activeTab?.url?.let { Uri.parse(it).host }
+                                        AdBlockManager.toggleSiteWhitelist(context, host)
+                                        activeTab?.webView?.reload()
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(if (isDarkTheme) "✓ الثيم الداكن" else "الثيم الداكن") },
+                                    leadingIcon = { Icon(Icons.Filled.DarkMode, contentDescription = null) },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        ThemeState.toggle(context)
+                                    }
+                                )
+                            }
                         }
                     }
                 )
@@ -425,6 +604,14 @@ fun BrowserScreen(
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        val isHttps = activeTab?.url?.startsWith("https://") == true
+                        Icon(
+                            imageVector = if (isHttps) Icons.Filled.Lock else Icons.Filled.LockOpen,
+                            contentDescription = if (isHttps) "اتصال مشفّر" else "اتصال غير مشفّر",
+                            modifier = Modifier.size(16.dp),
+                            tint = if (isHttps) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                        )
+                        Spacer(modifier = Modifier.padding(start = 6.dp))
                         Icon(
                             Icons.Filled.Language,
                             contentDescription = null,
@@ -441,7 +628,7 @@ fun BrowserScreen(
                             ),
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
                             keyboardActions = KeyboardActions(onGo = {
-                                activeTab?.webView?.loadUrl(normalizeUrl(addressBarText))
+                                activeTab?.webView?.loadUrl(resolveAddressInput(addressBarText))
                             }),
                             modifier = Modifier
                                 .weight(1f)
@@ -508,13 +695,14 @@ fun BrowserScreen(
                     }
 
                     IconButton(onClick = {
-                        PrefsManager.addFavorite(context, addressBarText)
+                        PrefsManager.addFavorite(context, activeTab?.title ?: addressBarText, addressBarText)
                         favorites = PrefsManager.getFavorites(context)
                     }) {
                         Icon(Icons.Filled.Star, contentDescription = "إضافة للمفضلة")
                     }
                     IconButton(onClick = {
                         favorites = PrefsManager.getFavorites(context)
+                        favoritesQuery = ""
                         showFavoritesDialog = true
                     }) {
                         Icon(Icons.Filled.List, contentDescription = "المفضلة")
@@ -541,9 +729,9 @@ fun BrowserScreen(
             }
         }
     ) { padding ->
-        // الحاوية (FrameLayout) تُبنى دائماً بغض النظر عن حالة البروكسي، عشان
-        // ما يصير سباق (race) بين إنشاء أول تبويب وجاهزية الحاوية، وتظهر
-        // حالة التحميل/عدم الدعم كطبقة فوقها بدل ما تمنع إنشاءها من الأساس
+        // الحاوية (FrameLayout داخل SwipeRefreshLayout للسحب-للتحديث) تُبنى دائماً
+        // بغض النظر عن حالة البروكسي، عشان ما يصير سباق (race) بين إنشاء أول
+        // تبويب وجاهزية الحاوية
         Box(
             modifier = Modifier
                 .padding(padding)
@@ -551,7 +739,14 @@ fun BrowserScreen(
         ) {
             AndroidView(
                 factory = { ctx ->
-                    FrameLayout(ctx).also { containerRef = it }
+                    val inner = FrameLayout(ctx).also { containerRef = it }
+                    SwipeRefreshLayout(ctx).apply {
+                        addView(inner)
+                        setOnRefreshListener {
+                            tabs.find { it.id == activeTabId }?.webView?.reload()
+                        }
+                        swipeRefreshRef = this
+                    }
                 },
                 modifier = Modifier.fillMaxSize()
             )
@@ -578,32 +773,51 @@ fun BrowserScreen(
             onDismissRequest = { showTabsDialog = false },
             title = { Text("التبويبات (${tabs.size})") },
             text = {
+                val grouped = tabs.groupBy { it.groupName ?: "" }
                 LazyColumn {
-                    items(tabs, key = { it.id }) { tab ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 4.dp)
-                                .clickable {
-                                    switchTab(tab.id)
-                                    showTabsDialog = false
-                                },
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = tab.title.ifBlank { "تبويب" },
-                                maxLines = 1,
-                                modifier = Modifier.weight(1f),
-                                style = if (tab.id == activeTabId) {
-                                    MaterialTheme.typography.bodyMedium.copy(
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                } else {
-                                    MaterialTheme.typography.bodyMedium
+                    grouped.forEach { (group, tabsInGroup) ->
+                        if (group.isNotBlank()) {
+                            item {
+                                Text(
+                                    text = group,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(top = 8.dp, bottom = 2.dp)
+                                )
+                            }
+                        }
+                        items(tabsInGroup, key = { it.id }) { tab ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp)
+                                    .combinedClickable(
+                                        onClick = {
+                                            switchTab(tab.id)
+                                            showTabsDialog = false
+                                        },
+                                        onLongClick = {
+                                            groupEditTab = tab
+                                            groupNameInput = tab.groupName ?: ""
+                                        }
+                                    ),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = tab.title.ifBlank { "تبويب" },
+                                    maxLines = 1,
+                                    modifier = Modifier.weight(1f),
+                                    style = if (tab.id == activeTabId) {
+                                        MaterialTheme.typography.bodyMedium.copy(
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    } else {
+                                        MaterialTheme.typography.bodyMedium
+                                    }
+                                )
+                                IconButton(onClick = { closeTab(tab.id) }) {
+                                    Icon(Icons.Filled.Close, contentDescription = "إغلاق التبويب")
                                 }
-                            )
-                            IconButton(onClick = { closeTab(tab.id) }) {
-                                Icon(Icons.Filled.Close, contentDescription = "إغلاق التبويب")
                             }
                         }
                     }
@@ -621,6 +835,30 @@ fun BrowserScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showTabsDialog = false }) { Text("إغلاق") }
+            }
+        )
+    }
+
+    groupEditTab?.let { tab ->
+        AlertDialog(
+            onDismissRequest = { groupEditTab = null },
+            title = { Text("مجموعة التبويب") },
+            text = {
+                OutlinedTextField(
+                    value = groupNameInput,
+                    onValueChange = { groupNameInput = it },
+                    singleLine = true,
+                    label = { Text("اسم المجموعة (اتركه فاضي لإزالته من أي مجموعة)") }
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    tab.groupName = groupNameInput.trim().ifBlank { null }
+                    groupEditTab = null
+                }) { Text("حفظ") }
+            },
+            dismissButton = {
+                TextButton(onClick = { groupEditTab = null }) { Text("إلغاء") }
             }
         )
     }
@@ -680,6 +918,19 @@ fun BrowserScreen(
 
                     Spacer(modifier = Modifier.padding(top = 16.dp))
 
+                    Text("حجم خط الصفحة: $textZoomInput%", style = MaterialTheme.typography.labelMedium)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = {
+                            textZoomInput = (textZoomInput - 10).coerceAtLeast(50)
+                        }) { Text("－") }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        TextButton(onClick = {
+                            textZoomInput = (textZoomInput + 10).coerceAtMost(200)
+                        }) { Text("＋") }
+                    }
+
+                    Spacer(modifier = Modifier.padding(top = 16.dp))
+
                     TextButton(onClick = {
                         CookieManager.getInstance().removeAllCookies(null)
                         CookieManager.getInstance().flush()
@@ -696,6 +947,8 @@ fun BrowserScreen(
             confirmButton = {
                 TextButton(onClick = {
                     PrefsManager.setHomepage(context, normalizeUrl(homepageInput))
+                    PrefsManager.setTextZoom(context, textZoomInput)
+                    tabs.forEach { it.webView?.settings?.textZoom = textZoomInput }
                     showSettingsDialog = false
                 }) { Text("حفظ") }
             },
@@ -710,32 +963,58 @@ fun BrowserScreen(
             onDismissRequest = { showFavoritesDialog = false },
             title = { Text("المفضلة") },
             text = {
-                if (favorites.isEmpty()) {
-                    Text("ما فيه مفضلات محفوظة بعد")
-                } else {
-                    LazyColumn {
-                        items(favorites) { fav ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = fav,
+                Column {
+                    OutlinedTextField(
+                        value = favoritesQuery,
+                        onValueChange = { favoritesQuery = it },
+                        singleLine = true,
+                        placeholder = { Text("بحث بالمفضلة") },
+                        leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.padding(top = 8.dp))
+
+                    val filtered = favorites.filter {
+                        favoritesQuery.isBlank() ||
+                            it.title.contains(favoritesQuery, ignoreCase = true) ||
+                            it.url.contains(favoritesQuery, ignoreCase = true)
+                    }
+
+                    if (filtered.isEmpty()) {
+                        Text("ما فيه نتائج")
+                    } else {
+                        LazyColumn {
+                            items(filtered) { fav ->
+                                Row(
                                     modifier = Modifier
-                                        .weight(1f)
-                                        .padding(end = 8.dp),
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                                TextButton(onClick = {
-                                    activeTab?.webView?.loadUrl(fav)
-                                    showFavoritesDialog = false
-                                }) { Text("فتح") }
-                                TextButton(onClick = {
-                                    PrefsManager.removeFavorite(context, fav)
-                                    favorites = PrefsManager.getFavorites(context)
-                                }) { Text("✕") }
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp)
+                                        .clickable {
+                                            activeTab?.webView?.loadUrl(fav.url)
+                                            showFavoritesDialog = false
+                                        },
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = fav.title,
+                                        maxLines = 1,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .padding(end = 8.dp),
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                    IconButton(onClick = {
+                                        editingFavorite = fav
+                                        editTitleInput = fav.title
+                                        editUrlInput = fav.url
+                                    }) {
+                                        Icon(Icons.Filled.Edit, contentDescription = "تعديل")
+                                    }
+                                    TextButton(onClick = {
+                                        PrefsManager.removeFavorite(context, fav.url)
+                                        favorites = PrefsManager.getFavorites(context)
+                                    }) { Text("✕") }
+                                }
                             }
                         }
                     }
@@ -743,6 +1022,158 @@ fun BrowserScreen(
             },
             confirmButton = {
                 TextButton(onClick = { showFavoritesDialog = false }) { Text("إغلاق") }
+            }
+        )
+    }
+
+    editingFavorite?.let { fav ->
+        AlertDialog(
+            onDismissRequest = { editingFavorite = null },
+            title = { Text("تعديل المفضلة") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = editTitleInput,
+                        onValueChange = { editTitleInput = it },
+                        singleLine = true,
+                        label = { Text("الاسم") }
+                    )
+                    Spacer(modifier = Modifier.padding(top = 8.dp))
+                    OutlinedTextField(
+                        value = editUrlInput,
+                        onValueChange = { editUrlInput = it },
+                        singleLine = true,
+                        label = { Text("الرابط") }
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    PrefsManager.updateFavorite(context, fav.url, editTitleInput, normalizeUrl(editUrlInput))
+                    favorites = PrefsManager.getFavorites(context)
+                    editingFavorite = null
+                }) { Text("حفظ") }
+            },
+            dismissButton = {
+                TextButton(onClick = { editingFavorite = null }) { Text("إلغاء") }
+            }
+        )
+    }
+
+    if (showHistoryDialog) {
+        AlertDialog(
+            onDismissRequest = { showHistoryDialog = false },
+            title = { Text("سجل التصفح") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = historyQuery,
+                        onValueChange = { historyQuery = it },
+                        singleLine = true,
+                        placeholder = { Text("بحث بالسجل") },
+                        leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.padding(top = 8.dp))
+
+                    val filtered = historyItems.filter {
+                        historyQuery.isBlank() ||
+                            it.title.contains(historyQuery, ignoreCase = true) ||
+                            it.url.contains(historyQuery, ignoreCase = true)
+                    }
+
+                    if (filtered.isEmpty()) {
+                        Text("ما فيه نتائج")
+                    } else {
+                        LazyColumn {
+                            items(filtered) { entry: HistoryEntry ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp)
+                                        .clickable {
+                                            activeTab?.webView?.loadUrl(entry.url)
+                                            showHistoryDialog = false
+                                        },
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(entry.title, maxLines = 1, style = MaterialTheme.typography.bodyMedium)
+                                        Text(
+                                            entry.url,
+                                            maxLines = 1,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    HistoryManager.clear(context)
+                    historyItems = emptyList()
+                }) { Text("مسح السجل") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showHistoryDialog = false }) { Text("إغلاق") }
+            }
+        )
+    }
+
+    longPressUrl?.let { url ->
+        AlertDialog(
+            onDismissRequest = { longPressUrl = null },
+            title = { Text("خيارات الرابط") },
+            text = { Text(url, maxLines = 2, style = MaterialTheme.typography.bodySmall) },
+            confirmButton = {
+                TextButton(onClick = {
+                    openTab(url, activate = false)
+                    longPressUrl = null
+                }) { Text("فتح بتبويب جديد") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = {
+                        val clipboard = context.getSystemService(ClipboardManager::class.java)
+                        clipboard?.setPrimaryClip(ClipData.newPlainText("link", url))
+                        longPressUrl = null
+                    }) { Text("نسخ") }
+                    TextButton(onClick = {
+                        val intent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_TEXT, url)
+                        }
+                        context.startActivity(Intent.createChooser(intent, "مشاركة الرابط").apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        })
+                        longPressUrl = null
+                    }) { Text("مشاركة") }
+                }
+            }
+        )
+    }
+
+    pendingPermission?.let { request ->
+        val labels = request.resources.joinToString("، ") { permissionLabel(it) }
+        AlertDialog(
+            onDismissRequest = { request.deny(); pendingPermission = null },
+            title = { Text("طلب صلاحية") },
+            text = { Text("الموقع (${request.origin.host}) يطلب الوصول لـ: $labels") },
+            confirmButton = {
+                TextButton(onClick = {
+                    request.grant(request.resources)
+                    pendingPermission = null
+                }) { Text("سماح") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    request.deny()
+                    pendingPermission = null
+                }) { Text("رفض") }
             }
         )
     }
@@ -820,5 +1251,16 @@ private fun normalizeUrl(input: String): String {
         trimmed
     } else {
         "https://$trimmed"
+    }
+}
+
+/** إذا النص المكتوب مو شكل رابط (فيه مسافات أو ماكو نقطة)، نرسله كبحث جوجل بدل ما نحاول نفتحه كرابط مكسور. */
+private fun resolveAddressInput(input: String): String {
+    val trimmed = input.trim()
+    val looksLikeUrl = !trimmed.contains(" ") && (trimmed.contains(".") || trimmed.startsWith("http"))
+    return if (looksLikeUrl) {
+        normalizeUrl(trimmed)
+    } else {
+        "https://www.google.com/search?q=" + URLEncoder.encode(trimmed, "UTF-8")
     }
 }

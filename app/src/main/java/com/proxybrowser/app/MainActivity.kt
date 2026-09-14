@@ -14,6 +14,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -21,6 +23,7 @@ import androidx.core.content.ContextCompat
 import com.proxybrowser.app.service.ProxyScanService
 import com.proxybrowser.app.state.ConnectionState
 import com.proxybrowser.app.state.ProxyState
+import com.proxybrowser.app.state.ThemeState
 import com.proxybrowser.app.ui.BrowserScreen
 import com.proxybrowser.app.ui.ScanningScreen
 
@@ -45,6 +48,9 @@ class MainActivity : ComponentActivity() {
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
+    private val mediaPermissionsLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -52,13 +58,24 @@ class MainActivity : ComponentActivity() {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
 
+        // نطلب صلاحيات الكاميرا/المايكروفون على مستوى النظام مرة وحدة، عشان
+        // موافقة المستخدم على طلب موقع معين داخل المتصفح تشتغل فعلياً
+        mediaPermissionsLauncher.launch(
+            arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+        )
+
         // نشغّل خدمة الفحص كـ Foreground Service عشان تستمر حتى لو المستخدم طلع من التطبيق
         val serviceIntent = Intent(this, ProxyScanService::class.java)
         ContextCompat.startForegroundService(this, serviceIntent)
         bindService(serviceIntent, connection, Context.BIND_AUTO_CREATE)
 
+        ThemeState.init(applicationContext)
+
         setContent {
-            MaterialTheme {
+            val isDark by ThemeState.isDarkTheme.collectAsState()
+            MaterialTheme(
+                colorScheme = if (isDark) darkColorScheme() else lightColorScheme()
+            ) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     val state by ProxyState.connectionState.collectAsState()
 
