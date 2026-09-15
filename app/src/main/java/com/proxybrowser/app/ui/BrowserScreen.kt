@@ -86,6 +86,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -108,9 +110,13 @@ import com.proxybrowser.app.data.FavoriteItem
 import com.proxybrowser.app.data.HistoryEntry
 import com.proxybrowser.app.data.HistoryManager
 import com.proxybrowser.app.data.PrefsManager
+import com.proxybrowser.app.data.ProxyBypassManager
 import com.proxybrowser.app.model.ProxyInfo
 import com.proxybrowser.app.model.ProxyType
 import com.proxybrowser.app.state.ThemeState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import java.net.URLEncoder
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicInteger
@@ -205,6 +211,42 @@ private fun permissionLabel(resource: String): String = when (resource) {
     else -> resource
 }
 
+/** يجيب اقتراحات بحث من جوجل أثناء الكتابة، عبر نفس البروكسي المستخدم بالتصفح. */
+private object SuggestionsFetcher {
+    suspend fun fetch(query: String, proxyInfo: ProxyInfo?): List<String> = withContext(Dispatchers.IO) {
+        if (query.isBlank()) return@withContext emptyList()
+        try {
+            val builder = okhttp3.OkHttpClient.Builder()
+                .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
+
+            if (proxyInfo != null) {
+                val type = if (proxyInfo.type == ProxyType.SOCKS5) {
+                    java.net.Proxy.Type.SOCKS
+                } else {
+                    java.net.Proxy.Type.HTTP
+                }
+                builder.proxy(
+                    java.net.Proxy(type, java.net.InetSocketAddress(proxyInfo.host, proxyInfo.port))
+                )
+            }
+
+            val url = "https://suggestqueries.google.com/complete/search?client=firefox&q=" +
+                URLEncoder.encode(query, "UTF-8")
+            val request = okhttp3.Request.Builder().url(url).build()
+
+            builder.build().newCall(request).execute().use { response ->
+                val body = response.body?.string() ?: return@withContext emptyList()
+                val arr = org.json.JSONArray(body)
+                val items = arr.optJSONArray(1) ?: return@withContext emptyList()
+                (0 until items.length()).map { items.getString(it) }
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+}
+
 @SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -245,6 +287,12 @@ fun BrowserScreen(
     var longPressUrl by remember { mutableStateOf<String?>(null) }
     var groupEditTab by remember { mutableStateOf<TabState?>(null) }
     var groupNameInput by remember { mutableStateOf("") }
+    var addressBarEditing by remember { mutableStateOf(false) }
+    var addressBarInput by remember { mutableStateOf("") }
+    var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
+    var showSecurityDialog by remember { mutableStateOf(false) }
+    val addressFocusRequester = remember { FocusRequester() }
+    var proxyBypassVersion by remember { mutableStateOf(0) }
 
     val isDarkTheme by ThemeState.isDarkTheme.collectAsState()
 
@@ -472,13 +520,30 @@ fun BrowserScreen(
         }
     }
 
+    // يفتح الكيبورد تلقائياً لما ندخل وضع التعديل بشريط العنوان
+    LaunchedEffect(addressBarEditing) {
+        if (addressBarEditing) {
+            addressFocusRequester.requestFocus()
+        }
+    }
+
+    // اقتراحات بحث من جوجل أثناء الكتابة (بتأخير بسيط عشان ما نرسل طلب كل حرف)
+    LaunchedEffect(addressBarInput, addressBarEditing) {
+        if (addressBarEditing && addressBarInput.isNotBlank()) {
+            delay(300)
+            suggestions = SuggestionsFetcher.fetch(addressBarInput, if (isProxyOn) proxy else null)
+        } else {
+            suggestions = emptyList()
+        }
+    }
+
     // زر الرجوع بالهاتف يرجع صفحة بالتبويب الحالي إذا فيه صفحات سابقة
     BackHandler(enabled = activeTab?.canGoBack == true) {
         activeTab?.webView?.goBack()
     }
 
     // يفعّل أو يلغي توجيه WebView عبر البروكسي حسب حالة زر تشغيل/إيقاف (يشمل كل التبويبات)
-    DisposableEffect(proxy, isProxyOn) {
+    DisposableEffect(proxy, isProxyOn, proxyBypassVersion) {
         val immediateExecutor = Executor { it.run() }
         proxyReady = false
 
@@ -487,9 +552,16 @@ fun BrowserScreen(
             proxyReady = true
         } else if (isProxyOn) {
             val scheme = if (proxy.type == ProxyType.SOCKS5) "socks5" else "http"
-            val proxyConfig = ProxyConfig.Builder()
+            val builder = ProxyConfig.Builder()
                 .addProxyRule("$scheme://${proxy.host}:${proxy.port}")
-                .build()
+
+            ProxyBypassManager.getAll(context).forEach { host ->
+                ProxyBypassManager.buildBypassRules(host).forEach { rule ->
+                    builder.addBypassRule(rule)
+                }
+            }
+
+            val proxyConfig = builder.build()
 
             ProxyController.getInstance().setProxyOverride(proxyConfig, immediateExecutor) {
                 proxyReady = true
@@ -512,10 +584,12 @@ fun BrowserScreen(
             Column {
                 TopAppBar(
                     title = {
-                        val status = if (isProxyOn) {
-                            "${proxy.host}:${proxy.port} • ${proxy.latencyMs}ms"
-                        } else {
-                            "اتصال مباشر"
+                        val currentHost = activeTab?.url?.let { Uri.parse(it).host }
+                        val isBypassed = ProxyBypassManager.isBypassed(context, currentHost)
+                        val status = when {
+                            isBypassed -> "بدون بروكسي (استثناء لهذا الموقع)"
+                            isProxyOn -> "${proxy.host}:${proxy.port} • ${proxy.latencyMs}ms"
+                            else -> "اتصال مباشر"
                         }
                         Text(status, style = MaterialTheme.typography.titleSmall)
                     },
@@ -581,6 +655,20 @@ fun BrowserScreen(
                                     }
                                 )
                                 DropdownMenuItem(
+                                    text = {
+                                        val host = activeTab?.url?.let { Uri.parse(it).host }
+                                        val bypassed = ProxyBypassManager.isBypassed(context, host)
+                                        Text(if (bypassed) "✓ تصفح هذا الموقع بدون بروكسي" else "تصفح هذا الموقع بدون بروكسي")
+                                    },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        val host = activeTab?.url?.let { Uri.parse(it).host }
+                                        ProxyBypassManager.toggleBypass(context, host)
+                                        proxyBypassVersion++
+                                        activeTab?.webView?.reload()
+                                    }
+                                )
+                                DropdownMenuItem(
                                     text = { Text(if (isDarkTheme) "✓ الثيم الداكن" else "الثيم الداكن") },
                                     leadingIcon = { Icon(Icons.Filled.DarkMode, contentDescription = null) },
                                     onClick = {
@@ -594,61 +682,125 @@ fun BrowserScreen(
                 )
 
                 // شريط عنوان الموقع لوحده — مستطيل مدوّر بعرض الشاشة كامل
-                Surface(
-                    shape = RoundedCornerShape(20.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                Column {
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
                     ) {
-                        val isHttps = activeTab?.url?.startsWith("https://") == true
-                        Icon(
-                            imageVector = if (isHttps) Icons.Filled.Lock else Icons.Filled.LockOpen,
-                            contentDescription = if (isHttps) "اتصال مشفّر" else "اتصال غير مشفّر",
-                            modifier = Modifier.size(16.dp),
-                            tint = if (isHttps) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
-                        )
-                        Spacer(modifier = Modifier.padding(start = 6.dp))
-                        Icon(
-                            Icons.Filled.Language,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.padding(start = 8.dp))
-                        BasicTextField(
-                            value = addressBarText,
-                            onValueChange = { addressBarText = it },
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.bodyMedium.copy(
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            ),
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                            keyboardActions = KeyboardActions(onGo = {
-                                activeTab?.webView?.loadUrl(resolveAddressInput(addressBarText))
-                            }),
-                            modifier = Modifier
-                                .weight(1f)
-                        )
-                        IconButton(
-                            onClick = {
-                                val current = activeTab?.url
-                                if (!current.isNullOrBlank()) {
-                                    activeTab?.webView?.loadUrl(buildGoogleTranslateUrl(current))
-                                }
-                            },
-                            modifier = Modifier.size(32.dp)
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                Icons.Filled.Translate,
-                                contentDescription = "ترجمة الصفحة",
-                                modifier = Modifier.size(18.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            val isHttps = activeTab?.url?.startsWith("https://") == true
+                            IconButton(
+                                onClick = { showSecurityDialog = true },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (isHttps) Icons.Filled.Lock else Icons.Filled.LockOpen,
+                                    contentDescription = "تفاصيل الاتصال",
+                                    modifier = Modifier.size(16.dp),
+                                    tint = if (isHttps) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                                )
+                            }
+
+                            if (addressBarEditing) {
+                                BasicTextField(
+                                    value = addressBarInput,
+                                    onValueChange = { addressBarInput = it },
+                                    singleLine = true,
+                                    textStyle = MaterialTheme.typography.bodyMedium.copy(
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    ),
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                                    keyboardActions = KeyboardActions(onGo = {
+                                        activeTab?.webView?.loadUrl(resolveAddressInput(addressBarInput))
+                                        addressBarEditing = false
+                                        suggestions = emptyList()
+                                    }),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(start = 6.dp)
+                                        .focusRequester(addressFocusRequester)
+                                )
+                            } else {
+                                Text(
+                                    text = (activeTab?.title?.ifBlank { null } ?: addressBarText).ifBlank { "ابحث أو اكتب رابط" },
+                                    maxLines = 1,
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    ),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(start = 6.dp)
+                                        .clickable {
+                                            addressBarInput = ""
+                                            addressBarEditing = true
+                                        }
+                                )
+                                IconButton(
+                                    onClick = {
+                                        addressBarInput = addressBarText
+                                        addressBarEditing = true
+                                    },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Edit,
+                                        contentDescription = "تعديل الرابط مباشرة",
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                }
+                            }
+
+                            IconButton(
+                                onClick = {
+                                    val current = activeTab?.url
+                                    if (!current.isNullOrBlank()) {
+                                        activeTab?.webView?.loadUrl(buildGoogleTranslateUrl(current))
+                                    }
+                                },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(
+                                    Icons.Filled.Translate,
+                                    contentDescription = "ترجمة الصفحة",
+                                    modifier = Modifier.size(18.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+
+                    if (addressBarEditing && suggestions.isNotEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                            tonalElevation = 4.dp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp)
+                        ) {
+                            Column {
+                                suggestions.take(6).forEach { suggestion ->
+                                    Text(
+                                        text = suggestion,
+                                        maxLines = 1,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                activeTab?.webView?.loadUrl(resolveAddressInput(suggestion))
+                                                addressBarEditing = false
+                                                suggestions = emptyList()
+                                            }
+                                            .padding(horizontal = 16.dp, vertical = 10.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -742,9 +894,21 @@ fun BrowserScreen(
                 factory = { ctx ->
                     val inner = FrameLayout(ctx).also { containerRef = it }
                     SwipeRefreshLayout(ctx).apply {
-                        addView(inner)
+                        addView(
+                            inner,
+                            FrameLayout.LayoutParams(
+                                FrameLayout.LayoutParams.MATCH_PARENT,
+                                FrameLayout.LayoutParams.MATCH_PARENT
+                            )
+                        )
                         setOnRefreshListener {
                             tabs.find { it.id == activeTabId }?.webView?.reload()
+                        }
+                        // بدون هذا، SwipeRefreshLayout يتحقق من FrameLayout الفارغة (دايماً
+                        // "بالأعلى") بدل الـ WebView الفعلي، فيسوي رفرش حتى لو الصفحة
+                        // مو بأعلاها فعلياً — نربطه بحالة تمرير الـ WebView النشط الحقيقية
+                        setOnChildScrollUpCallback { _, _ ->
+                            tabs.find { it.id == activeTabId }?.webView?.canScrollVertically(-1) == true
                         }
                         swipeRefreshRef = this
                     }
@@ -1121,6 +1285,42 @@ fun BrowserScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showHistoryDialog = false }) { Text("إغلاق") }
+            }
+        )
+    }
+
+    if (showSecurityDialog) {
+        val url = activeTab?.url.orEmpty()
+        val host = try { Uri.parse(url).host } catch (e: Exception) { null }
+        val isHttps = url.startsWith("https://")
+        AlertDialog(
+            onDismissRequest = { showSecurityDialog = false },
+            title = { Text(if (isHttps) "الاتصال مشفّر" else "الاتصال غير مشفّر") },
+            text = {
+                Column {
+                    Text("الموقع: ${host ?: "—"}")
+                    Spacer(modifier = Modifier.padding(top = 6.dp))
+                    Text(
+                        if (isHttps) {
+                            "البيانات بين جهازك وهذا الموقع مشفّرة عبر HTTPS."
+                        } else {
+                            "تنبيه: هذا الموقع يستخدم HTTP بدون تشفير — أي بيانات ترسلها له ممكن تكون مكشوفة على الشبكة."
+                        }
+                    )
+                    Spacer(modifier = Modifier.padding(top = 6.dp))
+                    Text(
+                        if (isProxyOn) {
+                            "التصفح حالياً عبر بروكسي: ${proxy.host}:${proxy.port}"
+                        } else {
+                            "التصفح حالياً باتصال مباشر (بدون بروكسي)"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showSecurityDialog = false }) { Text("إغلاق") }
             }
         )
     }
