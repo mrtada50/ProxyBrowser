@@ -88,6 +88,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -708,6 +709,7 @@ fun BrowserScreen(
                             }
 
                             if (addressBarEditing) {
+                                var hasBeenFocused by remember(activeTabId) { mutableStateOf(false) }
                                 BasicTextField(
                                     value = addressBarInput,
                                     onValueChange = { addressBarInput = it },
@@ -725,6 +727,15 @@ fun BrowserScreen(
                                         .weight(1f)
                                         .padding(start = 6.dp)
                                         .focusRequester(addressFocusRequester)
+                                        .onFocusChanged { state ->
+                                            if (state.isFocused) {
+                                                hasBeenFocused = true
+                                            } else if (hasBeenFocused) {
+                                                // ضغط بمكان ثاني (فقدان التركيز) — نرجع للوضع الطبيعي
+                                                addressBarEditing = false
+                                                suggestions = emptyList()
+                                            }
+                                        }
                                 )
                             } else {
                                 Text(
