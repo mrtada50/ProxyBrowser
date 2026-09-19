@@ -16,6 +16,7 @@ object PrefsManager {
     private const val KEY_FAVORITES = "favorites_v2"
     private const val KEY_DARK_THEME = "dark_theme"
     private const val KEY_TEXT_ZOOM = "text_zoom"
+    private const val KEY_DATA_SAVER = "data_saver"
     private const val DEFAULT_HOMEPAGE = "https://www.google.com"
 
     fun getHomepage(context: Context): String {
@@ -46,6 +47,16 @@ object PrefsManager {
     fun setTextZoom(context: Context, zoom: Int) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putInt(KEY_TEXT_ZOOM, zoom).apply()
+    }
+
+    fun isDataSaverOn(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_DATA_SAVER, false)
+    }
+
+    fun setDataSaverOn(context: Context, enabled: Boolean) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean(KEY_DATA_SAVER, enabled).apply()
     }
 
     fun getFavorites(context: Context): List<FavoriteItem> {

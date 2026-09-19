@@ -1,15 +1,21 @@
 package com.proxybrowser.app.ui
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.app.DownloadManager
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.net.Uri
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.Message
+import android.provider.MediaStore
+import android.speech.RecognizerIntent
 import android.view.View
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
@@ -26,6 +32,8 @@ import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -47,6 +55,12 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.FileUpload
+import androidx.compose.material.icons.filled.FindInPage
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.Close
@@ -92,6 +106,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -104,10 +119,12 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import androidx.webkit.ProxyConfig
 import androidx.webkit.ProxyController
+import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
 import com.proxybrowser.app.data.AdBlockManager
 import com.proxybrowser.app.data.DomainVisitTracker
 import com.proxybrowser.app.data.FavoriteItem
+import com.proxybrowser.app.data.ForceDarkManager
 import com.proxybrowser.app.data.HistoryEntry
 import com.proxybrowser.app.data.HistoryManager
 import com.proxybrowser.app.data.PrefsManager
@@ -115,8 +132,11 @@ import com.proxybrowser.app.data.ProxyBypassManager
 import com.proxybrowser.app.model.ProxyInfo
 import com.proxybrowser.app.model.ProxyType
 import com.proxybrowser.app.state.ThemeState
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.net.URLEncoder
 import java.util.concurrent.Executor
@@ -191,6 +211,30 @@ private class MediaBridge(private val onFound: (List<String>) -> Unit) {
             emptyList()
         }
         Handler(Looper.getMainLooper()).post { onFound(list) }
+    }
+}
+
+// يراقب تحديد النص بالصفحة عشان زر "ترجم النص المحدد"
+private const val SELECTION_WATCH_JS = """
+(function() {
+    try {
+        document.addEventListener('selectionchange', function() {
+            var sel = window.getSelection().toString();
+            if (sel && sel.length > 0 && sel.length < 500) {
+                AndroidSelection.onSelection(sel);
+            } else {
+                AndroidSelection.onSelection('');
+            }
+        });
+    } catch (e) {}
+})();
+"""
+
+/** جسر JavaScript يستقبل النص المحدد حالياً بالصفحة (لزر الترجمة السريعة). */
+private class SelectionBridge(private val onSelected: (String) -> Unit) {
+    @JavascriptInterface
+    fun onSelection(text: String) {
+        Handler(Looper.getMainLooper()).post { onSelected(text) }
     }
 }
 
@@ -293,6 +337,94 @@ fun BrowserScreen(
     var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
     var showSecurityDialog by remember { mutableStateOf(false) }
     val addressFocusRequester = remember { FocusRequester() }
+    val coroutineScope = rememberCoroutineScope()
+
+    var showFindBar by remember { mutableStateOf(false) }
+    var findQuery by remember { mutableStateOf("") }
+    var findMatchInfo by remember { mutableStateOf("") }
+    var selectedText by remember { mutableStateOf("") }
+    var translationResult by remember { mutableStateOf<String?>(null) }
+    var isTranslating by remember { mutableStateOf(false) }
+
+    fun exportFavorites() {
+        val json = org.json.JSONArray().apply {
+            favorites.forEach {
+                put(org.json.JSONObject().apply { put("title", it.title); put("url", it.url) })
+            }
+        }.toString(2)
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, json)
+            putExtra(Intent.EXTRA_SUBJECT, "مفضلة Proxy Browser")
+        }
+        context.startActivity(Intent.createChooser(intent, "تصدير المفضلة").apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        })
+    }
+
+    val importFavoritesLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        if (uri != null) {
+            try {
+                val text = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                if (!text.isNullOrBlank()) {
+                    val arr = org.json.JSONArray(text)
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.getJSONObject(i)
+                        PrefsManager.addFavorite(context, obj.optString("title"), obj.optString("url"))
+                    }
+                    favorites = PrefsManager.getFavorites(context)
+                    Toast.makeText(context, "تم استيراد المفضلة", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(context, "ملف غير صالح للاستيراد", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    val importChromeLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        if (uri != null) {
+            try {
+                val text = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                if (!text.isNullOrBlank()) {
+                    val regex = Regex("<A[^>]*HREF=\"([^\"]+)\"[^>]*>([^<]*)</A>", RegexOption.IGNORE_CASE)
+                    var count = 0
+                    regex.findAll(text).forEach { match ->
+                        val linkUrl = match.groupValues[1]
+                        val linkTitle = match.groupValues[2].ifBlank { linkUrl }
+                        if (linkUrl.startsWith("http")) {
+                            PrefsManager.addFavorite(context, linkTitle, linkUrl)
+                            count++
+                        }
+                    }
+                    favorites = PrefsManager.getFavorites(context)
+                    Toast.makeText(context, "تم استيراد $count رابط من كروم", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(context, "تعذّر قراءة ملف المفضلة", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    val voiceLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val spoken = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+            if (!spoken.isNullOrBlank()) {
+                addressBarInput = spoken
+                tabs.find { it.id == activeTabId }?.webView?.loadUrl(resolveAddressInput(spoken))
+                addressBarEditing = false
+            }
+        }
+    }
+
+    val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+        val contents = result.contents
+        if (!contents.isNullOrBlank()) {
+            tabs.find { it.id == activeTabId }?.webView?.loadUrl(resolveAddressInput(contents))
+            addressBarEditing = false
+        }
+    }
     var proxyBypassVersion by remember { mutableStateOf(0) }
 
     val isDarkTheme by ThemeState.isDarkTheme.collectAsState()
@@ -325,12 +457,39 @@ fun BrowserScreen(
             settings.setGeolocationEnabled(false)
             settings.textZoom = PrefsManager.getTextZoom(context)
 
+            val dataSaverOn = PrefsManager.isDataSaverOn(context)
+            settings.blockNetworkImage = dataSaverOn
+            if (dataSaverOn) settings.mediaPlaybackRequiresUserGesture = true
+
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+                val host = Uri.parse(tab.url).host
+                val enabled = ForceDarkManager.isEnabled(context) && !ForceDarkManager.isSiteExempt(context, host)
+                WebSettingsCompat.setForceDark(
+                    settings,
+                    if (enabled) WebSettingsCompat.FORCE_DARK_ON else WebSettingsCompat.FORCE_DARK_OFF
+                )
+            }
+
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
             addJavascriptInterface(
                 MediaBridge { links -> tab.mediaLinks = links },
                 "AndroidMedia"
             )
+            addJavascriptInterface(
+                SelectionBridge { text -> if (tab.id == activeTabId) selectedText = text },
+                "AndroidSelection"
+            )
+
+            setFindListener { activeMatchOrdinal, numberOfMatches, isDoneCounting ->
+                if (tab.id == activeTabId && isDoneCounting) {
+                    findMatchInfo = if (numberOfMatches > 0) {
+                        "${activeMatchOrdinal + 1}/$numberOfMatches"
+                    } else {
+                        "0/0"
+                    }
+                }
+            }
 
             setOnLongClickListener {
                 val result = hitTestResult
@@ -360,8 +519,23 @@ fun BrowserScreen(
                     }
                     tab.canGoBack = view?.canGoBack() == true
                     tab.mediaLinks = emptyList()
+                    if (tab.id == activeTabId) selectedText = ""
                     view?.evaluateJavascript(MEDIA_SCAN_JS, null)
+                    view?.evaluateJavascript(SELECTION_WATCH_JS, null)
                     if (tab.readerMode) view?.evaluateJavascript(READER_MODE_JS, null)
+
+                    if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+                        val host = Uri.parse(tab.url).host
+                        val enabled = ForceDarkManager.isEnabled(context) &&
+                            !ForceDarkManager.isSiteExempt(context, host)
+                        view?.settings?.let {
+                            WebSettingsCompat.setForceDark(
+                                it,
+                                if (enabled) WebSettingsCompat.FORCE_DARK_ON else WebSettingsCompat.FORCE_DARK_OFF
+                            )
+                        }
+                    }
+
                     CookieManager.getInstance().flush()
                     swipeRefreshRef?.isRefreshing = false
                 }
@@ -677,6 +851,91 @@ fun BrowserScreen(
                                         ThemeState.toggle(context)
                                     }
                                 )
+                                DropdownMenuItem(
+                                    text = {
+                                        val on = ForceDarkManager.isEnabled(context)
+                                        Text(if (on) "✓ وضع داكن قسري للمواقع" else "وضع داكن قسري للمواقع")
+                                    },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        ForceDarkManager.setEnabled(context, !ForceDarkManager.isEnabled(context))
+                                        tabs.forEach { it.webView?.reload() }
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        val host = activeTab?.url?.let { Uri.parse(it).host }
+                                        val exempt = ForceDarkManager.isSiteExempt(context, host)
+                                        Text(if (exempt) "✓ تعطيل الوضع الداكن لهذا الموقع" else "تعطيل الوضع الداكن لهذا الموقع")
+                                    },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        val host = activeTab?.url?.let { Uri.parse(it).host }
+                                        ForceDarkManager.toggleSiteExemption(context, host)
+                                        activeTab?.webView?.reload()
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        val on = PrefsManager.isDataSaverOn(context)
+                                        Text(if (on) "✓ وضع توفير البيانات" else "وضع توفير البيانات")
+                                    },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        val newValue = !PrefsManager.isDataSaverOn(context)
+                                        PrefsManager.setDataSaverOn(context, newValue)
+                                        tabs.forEach {
+                                            it.webView?.settings?.blockNetworkImage = newValue
+                                            it.webView?.reload()
+                                        }
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("بحث بالصفحة الحالية") },
+                                    leadingIcon = { Icon(Icons.Filled.FindInPage, contentDescription = null) },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        showFindBar = true
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("قص شاشة كاملة للصفحة") },
+                                    leadingIcon = { Icon(Icons.Filled.CameraAlt, contentDescription = null) },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        captureFullPageScreenshot(context, activeTab?.webView)
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("تصدير المفضلة") },
+                                    leadingIcon = { Icon(Icons.Filled.FileDownload, contentDescription = null) },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        exportFavorites()
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("استيراد المفضلة") },
+                                    leadingIcon = { Icon(Icons.Filled.FileUpload, contentDescription = null) },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        importFavoritesLauncher.launch("*/*")
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("استيراد مفضلة من كروم") },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        importChromeLauncher.launch("text/html")
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("بدّل البروكسي الآن") },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        onProxyLost()
+                                    }
+                                )
                             }
                         }
                     }
@@ -737,6 +996,37 @@ fun BrowserScreen(
                                             }
                                         }
                                 )
+                                IconButton(
+                                    onClick = {
+                                        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                            putExtra(
+                                                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                                                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                                            )
+                                        }
+                                        try {
+                                            voiceLauncher.launch(intent)
+                                        } catch (e: Exception) {
+                                            Toast.makeText(context, "البحث الصوتي غير متوفر بجهازك", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(Icons.Filled.Mic, contentDescription = "بحث صوتي", modifier = Modifier.size(16.dp))
+                                }
+                                IconButton(
+                                    onClick = {
+                                        qrLauncher.launch(
+                                            ScanOptions()
+                                                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                                                .setPrompt("وجّه الكاميرا نحو رمز QR")
+                                                .setBeepEnabled(false)
+                                        )
+                                    },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(Icons.Filled.QrCodeScanner, contentDescription = "مسح QR", modifier = Modifier.size(16.dp))
+                                }
                             } else {
                                 Text(
                                     text = (activeTab?.title?.ifBlank { null } ?: addressBarText).ifBlank { "ابحث أو اكتب رابط" },
@@ -890,6 +1180,45 @@ fun BrowserScreen(
                         }
                     }
                 }
+
+                if (showFindBar) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = findQuery,
+                            onValueChange = {
+                                findQuery = it
+                                activeTab?.webView?.findAllAsync(it)
+                            },
+                            singleLine = true,
+                            placeholder = { Text("بحث بالصفحة") },
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            findMatchInfo,
+                            modifier = Modifier.padding(horizontal = 8.dp),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        IconButton(onClick = { activeTab?.webView?.findNext(false) }) {
+                            Icon(Icons.Filled.ArrowBack, contentDescription = "السابق")
+                        }
+                        IconButton(onClick = { activeTab?.webView?.findNext(true) }) {
+                            Icon(Icons.Filled.ArrowForward, contentDescription = "التالي")
+                        }
+                        IconButton(onClick = {
+                            activeTab?.webView?.clearMatches()
+                            showFindBar = false
+                            findQuery = ""
+                            findMatchInfo = ""
+                        }) {
+                            Icon(Icons.Filled.Close, contentDescription = "إغلاق البحث")
+                        }
+                    }
+                }
             }
         }
     ) { padding ->
@@ -941,7 +1270,46 @@ fun BrowserScreen(
                     CircularProgressIndicator()
                 }
             }
+
+            if (selectedText.isNotBlank() && proxyReady && proxySupported) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .padding(bottom = 24.dp)
+                            .clickable {
+                                val textToTranslate = selectedText
+                                isTranslating = true
+                                coroutineScope.launch {
+                                    translationResult = translateSelectedText(
+                                        textToTranslate,
+                                        if (isProxyOn) proxy else null
+                                    )
+                                    isTranslating = false
+                                }
+                            }
+                    ) {
+                        Text(
+                            if (isTranslating) "جاري الترجمة..." else "ترجم النص المحدد",
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)
+                        )
+                    }
+                }
+            }
         }
+    }
+
+    translationResult?.let { result ->
+        AlertDialog(
+            onDismissRequest = { translationResult = null },
+            title = { Text("الترجمة") },
+            text = { Text(result) },
+            confirmButton = {
+                TextButton(onClick = { translationResult = null }) { Text("إغلاق") }
+            }
+        )
     }
 
     if (showTabsDialog) {
@@ -1407,6 +1775,77 @@ fun BrowserScreen(
                 TextButton(onClick = { pendingDownload = null }) { Text("رفض") }
             }
         )
+    }
+}
+
+/** يترجم نص محدد (بدون فتح صفحة جديدة) عبر خدمة جوجل، بنفس بروكسي التصفح الحالي. */
+private suspend fun translateSelectedText(text: String, proxyInfo: ProxyInfo?): String =
+    withContext(Dispatchers.IO) {
+        try {
+            val builder = okhttp3.OkHttpClient.Builder()
+                .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+
+            if (proxyInfo != null) {
+                val type = if (proxyInfo.type == ProxyType.SOCKS5) {
+                    java.net.Proxy.Type.SOCKS
+                } else {
+                    java.net.Proxy.Type.HTTP
+                }
+                builder.proxy(
+                    java.net.Proxy(type, java.net.InetSocketAddress(proxyInfo.host, proxyInfo.port))
+                )
+            }
+
+            val url = "https://translate.googleapis.com/translate_a/single" +
+                "?client=gtx&sl=auto&tl=ar&dt=t&q=" + URLEncoder.encode(text, "UTF-8")
+            val request = okhttp3.Request.Builder().url(url).build()
+
+            builder.build().newCall(request).execute().use { response ->
+                val body = response.body?.string() ?: return@withContext "تعذّرت الترجمة"
+                val segments = org.json.JSONArray(body).optJSONArray(0) ?: return@withContext "تعذّرت الترجمة"
+                val sb = StringBuilder()
+                for (i in 0 until segments.length()) {
+                    sb.append(segments.optJSONArray(i)?.optString(0).orEmpty())
+                }
+                sb.toString().ifBlank { "تعذّرت الترجمة" }
+            }
+        } catch (e: Exception) {
+            "تعذّرت الترجمة (تحقق من الاتصال)"
+        }
+    }
+
+/**
+ * يلتقط لقطة للصفحة كاملة (حتى الجزء اللي مو ظاهر بالشاشة) ويحفظها بمعرض الصور.
+ * ملاحظة: يعتمد على أبعاد المحتوى المحسوبة من WebView، فبعض الصفحات ذات
+ * التخطيط المعقّد (عناصر عائمة/تحميل كسول) ممكن ما تُلتقط بدقة كاملة.
+ */
+private fun captureFullPageScreenshot(context: android.content.Context, webView: WebView?) {
+    if (webView == null) return
+    try {
+        val contentHeight = (webView.contentHeight * webView.scale).toInt().coerceAtLeast(webView.height)
+        val bitmap = Bitmap.createBitmap(webView.width, contentHeight, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        webView.draw(canvas)
+
+        val filename = "page_${System.currentTimeMillis()}.png"
+        val resolver = context.contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, filename)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+            put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/ProxyBrowser")
+        }
+        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+        if (uri != null) {
+            resolver.openOutputStream(uri)?.use { out ->
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+            }
+            Toast.makeText(context, "تم حفظ صورة الصفحة بمعرض الصور", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "تعذّر حفظ الصورة", Toast.LENGTH_SHORT).show()
+        }
+    } catch (e: Exception) {
+        Toast.makeText(context, "تعذّر التقاط الصفحة", Toast.LENGTH_SHORT).show()
     }
 }
 

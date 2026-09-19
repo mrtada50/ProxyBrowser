@@ -73,4 +73,7 @@ dependencies {
 
     // سحب للتحديث
     implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
+
+    // مسح QR Code
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 }
