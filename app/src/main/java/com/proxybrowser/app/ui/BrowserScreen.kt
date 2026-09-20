@@ -164,6 +164,7 @@ private class TabState(val id: Int, initialUrl: String) {
     var desktopMode by mutableStateOf(false)
     var readerMode by mutableStateOf(false)
     var groupName by mutableStateOf<String?>(null)
+    var lastProcessedUrl: String? = null
 }
 
 // سكربت يفحص الصفحة الحالية عن وسوم فيديو/صوت ويجمع روابطها
@@ -520,19 +521,29 @@ fun BrowserScreen(
                     tab.canGoBack = view?.canGoBack() == true
                     tab.mediaLinks = emptyList()
                     if (tab.id == activeTabId) selectedText = ""
-                    view?.evaluateJavascript(MEDIA_SCAN_JS, null)
-                    view?.evaluateJavascript(SELECTION_WATCH_JS, null)
-                    if (tab.readerMode) view?.evaluateJavascript(READER_MODE_JS, null)
 
-                    if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
-                        val host = Uri.parse(tab.url).host
-                        val enabled = ForceDarkManager.isEnabled(context) &&
-                            !ForceDarkManager.isSiteExempt(context, host)
-                        view?.settings?.let {
-                            WebSettingsCompat.setForceDark(
-                                it,
-                                if (enabled) WebSettingsCompat.FORCE_DARK_ON else WebSettingsCompat.FORCE_DARK_OFF
-                            )
+                    // نشغّل الفحوصات الثقيلة (فحص وسائط، مراقبة تحديد نص، وضع
+                    // داكن قسري) مرة وحدة بس لكل رابط فعلي — بعض المواقع
+                    // (زي جوجل) تستدعي onPageFinished عدة مرات لنفس الرابط
+                    // بسبب تحديثات AJAX داخلية، وتكرار هالفحوصات كان يبطّئ
+                    // ظهور المحتوى بشكل ملحوظ
+                    if (url != null && url != tab.lastProcessedUrl) {
+                        tab.lastProcessedUrl = url
+
+                        view?.evaluateJavascript(MEDIA_SCAN_JS, null)
+                        view?.evaluateJavascript(SELECTION_WATCH_JS, null)
+                        if (tab.readerMode) view?.evaluateJavascript(READER_MODE_JS, null)
+
+                        if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+                            val host = Uri.parse(url).host
+                            val enabled = ForceDarkManager.isEnabled(context) &&
+                                !ForceDarkManager.isSiteExempt(context, host)
+                            view?.settings?.let {
+                                WebSettingsCompat.setForceDark(
+                                    it,
+                                    if (enabled) WebSettingsCompat.FORCE_DARK_ON else WebSettingsCompat.FORCE_DARK_OFF
+                                )
+                            }
                         }
                     }
 
