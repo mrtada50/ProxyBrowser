@@ -724,7 +724,7 @@ fun BrowserScreen(
                 }
 
                 override fun onHideCustomView() {
-                    fullscreenCallback?.onCustomViewCallback()
+                    fullscreenCallback?.onCustomViewHidden()
                     fullscreenView = null
                     fullscreenCallback = null
                 }
@@ -1565,7 +1565,7 @@ fun BrowserScreen(
             modifier = Modifier.fillMaxSize()
         )
         BackHandler(enabled = true) {
-            fullscreenCallback?.onCustomViewCallback()
+            fullscreenCallback?.onCustomViewHidden()
             fullscreenView = null
             fullscreenCallback = null
         }
