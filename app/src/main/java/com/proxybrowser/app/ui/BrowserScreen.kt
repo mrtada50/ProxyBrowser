@@ -1,5 +1,8 @@
 package com.proxybrowser.app.ui
 
+import com.proxybrowser.app.MainActivity
+import com.proxybrowser.app.R
+
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.DownloadManager
@@ -38,6 +41,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -110,6 +115,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -117,6 +124,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+import androidx.core.content.pm.ShortcutInfoCompat
+import androidx.core.content.pm.ShortcutManagerCompat
+import androidx.core.graphics.drawable.IconCompat
 import androidx.webkit.ProxyConfig
 import androidx.webkit.ProxyController
 import androidx.webkit.WebSettingsCompat
@@ -132,6 +142,8 @@ import com.proxybrowser.app.data.ProxyBypassManager
 import com.proxybrowser.app.model.ProxyInfo
 import com.proxybrowser.app.model.ProxyType
 import com.proxybrowser.app.state.ThemeState
+import com.proxybrowser.app.state.ShortcutAction
+import com.proxybrowser.app.state.ShortcutIntentState
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.Dispatchers
@@ -165,6 +177,8 @@ private class TabState(val id: Int, initialUrl: String) {
     var readerMode by mutableStateOf(false)
     var groupName by mutableStateOf<String?>(null)
     var lastProcessedUrl: String? = null
+    var proxyRetryCount = 0
+    var favicon by mutableStateOf<Bitmap?>(null)
 }
 
 // سكربت يفحص الصفحة الحالية عن وسوم فيديو/صوت ويجمع روابطها
@@ -239,6 +253,23 @@ private class SelectionBridge(private val onSelected: (String) -> Unit) {
     }
 }
 
+// يفحص الصفحة عن وجود حقل كلمة مرور (لتنبيه المستخدم وهو يتصفح عبر بروكسي)
+private const val PASSWORD_FIELD_SCAN_JS = """
+(function() {
+    try {
+        var hasPassword = document.querySelector('input[type="password"]') !== null;
+        AndroidSecurity.onPasswordFieldFound(hasPassword);
+    } catch (e) {}
+})();
+"""
+
+private class SecurityBridge(private val onResult: (Boolean) -> Unit) {
+    @JavascriptInterface
+    fun onPasswordFieldFound(found: Boolean) {
+        Handler(Looper.getMainLooper()).post { onResult(found) }
+    }
+}
+
 // أخطاء اتصال حقيقية فقط (استبعاد أخطاء الحظر الطبيعية زي حظر الإعلانات
 // أو منع النوافذ المنبثقة، عشان ما تنعتبر خطأ بالبروكسي بالغلط)
 private val PROXY_FAILURE_ERROR_CODES = setOf(
@@ -251,10 +282,47 @@ private val PROXY_FAILURE_ERROR_CODES = setOf(
 
 private val nextTabIdCounter = AtomicInteger(1)
 
+private val AVATAR_COLORS = listOf(
+    Color(0xFF5C6BC0), Color(0xFF26A69A), Color(0xFFEF5350),
+    Color(0xFFAB47BC), Color(0xFF66BB6A), Color(0xFFFFA726),
+    Color(0xFF29B6F6), Color(0xFF8D6E63)
+)
+
+@Composable
+private fun SiteAvatar(label: String, sizeDp: androidx.compose.ui.unit.Dp = 28.dp) {
+    val letter = label.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
+    val color = AVATAR_COLORS[(label.hashCode().and(Int.MAX_VALUE)) % AVATAR_COLORS.size]
+    Box(
+        modifier = Modifier
+            .size(sizeDp)
+            .background(color, shape = androidx.compose.foundation.shape.CircleShape),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(letter, color = Color.White, fontSize = 12.sp)
+    }
+}
+
 private fun permissionLabel(resource: String): String = when (resource) {
     PermissionRequest.RESOURCE_VIDEO_CAPTURE -> "الكاميرا"
     PermissionRequest.RESOURCE_AUDIO_CAPTURE -> "المايكروفون"
     else -> resource
+}
+
+/**
+ * أندرويد الحديث (WebView/Chromium الحديثة) يقرر تفعيل التظليل الخوارزمي
+ * (الوضع الداكن القسري) بالاعتماد على Configuration.uiMode الفعلي للـ Context
+ * اللي انبنى منه الـ WebView، مو بس على علم setForceDark وحده. لهذا نلف
+ * الـ Context بإعداد ليلي/نهاري صريح حسب الحاجة قبل إنشاء كل WebView.
+ */
+private fun darkAwareContext(base: android.content.Context, dark: Boolean): android.content.Context {
+    val config = android.content.res.Configuration(base.resources.configuration)
+    config.uiMode = (config.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK.inv()) or
+        if (dark) {
+            android.content.res.Configuration.UI_MODE_NIGHT_YES
+        } else {
+            android.content.res.Configuration.UI_MODE_NIGHT_NO
+        }
+    return base.createConfigurationContext(config)
 }
 
 /** يجيب اقتراحات بحث من جوجل أثناء الكتابة، عبر نفس البروكسي المستخدم بالتصفح. */
@@ -346,6 +414,11 @@ fun BrowserScreen(
     var selectedText by remember { mutableStateOf("") }
     var translationResult by remember { mutableStateOf<String?>(null) }
     var isTranslating by remember { mutableStateOf(false) }
+    var fullscreenView by remember { mutableStateOf<View?>(null) }
+    var fullscreenCallback by remember { mutableStateOf<WebChromeClient.CustomViewCallback?>(null) }
+    var showAdBlockStatsDialog by remember { mutableStateOf(false) }
+    var showSensitiveLoginWarning by remember { mutableStateOf(false) }
+    var showWhatsNewDialog by remember { mutableStateOf(false) }
 
     fun exportFavorites() {
         val json = org.json.JSONArray().apply {
@@ -439,7 +512,15 @@ fun BrowserScreen(
     }
 
     fun configureWebView(tab: TabState): WebView {
-        return WebView(context).apply {
+        val initialHost = Uri.parse(tab.url).host
+        val wantDark = ForceDarkManager.isEnabled(context) && !ForceDarkManager.isSiteExempt(context, initialHost)
+        val webViewContext = if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+            darkAwareContext(context, wantDark)
+        } else {
+            context
+        }
+
+        return WebView(webViewContext).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.databaseEnabled = true
@@ -463,12 +544,13 @@ fun BrowserScreen(
             if (dataSaverOn) settings.mediaPlaybackRequiresUserGesture = true
 
             if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
-                val host = Uri.parse(tab.url).host
-                val enabled = ForceDarkManager.isEnabled(context) && !ForceDarkManager.isSiteExempt(context, host)
                 WebSettingsCompat.setForceDark(
                     settings,
-                    if (enabled) WebSettingsCompat.FORCE_DARK_ON else WebSettingsCompat.FORCE_DARK_OFF
+                    if (wantDark) WebSettingsCompat.FORCE_DARK_ON else WebSettingsCompat.FORCE_DARK_OFF
                 )
+                if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+                    WebSettingsCompat.setAlgorithmicDarkeningAllowed(settings, wantDark)
+                }
             }
 
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
@@ -480,6 +562,16 @@ fun BrowserScreen(
             addJavascriptInterface(
                 SelectionBridge { text -> if (tab.id == activeTabId) selectedText = text },
                 "AndroidSelection"
+            )
+            addJavascriptInterface(
+                SecurityBridge { found ->
+                    if (found && isProxyOn && tab.id == activeTabId &&
+                        !PrefsManager.getSensitiveLoginWarningSuppressed(context)
+                    ) {
+                        showSensitiveLoginWarning = true
+                    }
+                },
+                "AndroidSecurity"
             )
 
             setFindListener { activeMatchOrdinal, numberOfMatches, isDoneCounting ->
@@ -519,6 +611,7 @@ fun BrowserScreen(
                         if (tab.id == activeTabId) addressBarText = it
                     }
                     tab.canGoBack = view?.canGoBack() == true
+                    tab.proxyRetryCount = 0
                     tab.mediaLinks = emptyList()
                     if (tab.id == activeTabId) selectedText = ""
 
@@ -532,6 +625,7 @@ fun BrowserScreen(
 
                         view?.evaluateJavascript(MEDIA_SCAN_JS, null)
                         view?.evaluateJavascript(SELECTION_WATCH_JS, null)
+                        view?.evaluateJavascript(PASSWORD_FIELD_SCAN_JS, null)
                         if (tab.readerMode) view?.evaluateJavascript(READER_MODE_JS, null)
 
                         if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
@@ -566,6 +660,7 @@ fun BrowserScreen(
                     AdBlockManager.ensureLoadedSync(context)
                     val host = request?.url?.host
                     if (AdBlockManager.isBlocked(host)) {
+                        AdBlockManager.recordBlocked()
                         return WebResourceResponse("text/plain", "utf-8", null)
                     }
                     return super.shouldInterceptRequest(view, request)
@@ -586,8 +681,17 @@ fun BrowserScreen(
                         errorCode != null &&
                         errorCode in PROXY_FAILURE_ERROR_CODES
                     ) {
-                        lostTriggered = true
-                        onProxyLost()
+                        // نعطي نفس البروكسي فرصتين قبل ما نعتبره ميت — بعض
+                        // الانقطاعات مؤقتة (لحظية) وترجع تشتغل من نفسها
+                        if (tab.proxyRetryCount < 2) {
+                            tab.proxyRetryCount++
+                            Handler(Looper.getMainLooper()).postDelayed({
+                                view?.reload()
+                            }, 1500)
+                        } else {
+                            lostTriggered = true
+                            onProxyLost()
+                        }
                     }
                 }
             }
@@ -603,9 +707,26 @@ fun BrowserScreen(
                     if (!title.isNullOrBlank()) tab.title = title
                 }
 
+                override fun onReceivedIcon(view: WebView?, icon: Bitmap?) {
+                    super.onReceivedIcon(view, icon)
+                    if (icon != null) tab.favicon = icon
+                }
+
                 override fun onPermissionRequest(request: PermissionRequest?) {
                     if (request == null) return
                     pendingPermission = request
+                }
+
+                override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+                    if (view == null) return
+                    fullscreenView = view
+                    fullscreenCallback = callback
+                }
+
+                override fun onHideCustomView() {
+                    fullscreenCallback?.onCustomViewCallback()
+                    fullscreenView = null
+                    fullscreenCallback = null
                 }
 
                 override fun onCreateWindow(
@@ -641,6 +762,24 @@ fun BrowserScreen(
         }
     }
 
+    /** يعيد بناء WebView التبويب بإعدادات جديدة (مطلوب للوضع الداكن القسري لأن الإعداد مربوط بالـ Context وقت الإنشاء). */
+    fun recreateWebView(tab: TabState) {
+        val url = tab.url
+        val wasActive = tab.id == activeTabId
+        val oldWebView = tab.webView
+        containerRef?.removeView(oldWebView)
+        oldWebView?.destroy()
+
+        val newWebView = configureWebView(tab)
+        tab.webView = newWebView
+        containerRef?.addView(
+            newWebView,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        )
+        newWebView.visibility = if (wasActive) View.VISIBLE else View.GONE
+        newWebView.loadUrl(url)
+    }
+
     fun openTab(url: String, activate: Boolean) {
         val tab = TabState(nextTabIdCounter.getAndIncrement(), url)
         val webView = configureWebView(tab)
@@ -667,6 +806,25 @@ fun BrowserScreen(
             val newActive = tabs.getOrNull((index - 1).coerceAtLeast(0)) ?: tabs.firstOrNull()
             newActive?.let { switchTab(it.id) }
         }
+    }
+
+    fun closeAllTabsExcept(keepId: Int) {
+        val toClose = tabs.filter { it.id != keepId }
+        toClose.forEach { t ->
+            containerRef?.removeView(t.webView)
+            t.webView?.destroy()
+        }
+        tabs.removeAll { it.id != keepId }
+        if (activeTabId != keepId) switchTab(keepId)
+    }
+
+    fun closeAllTabs() {
+        tabs.forEach { t ->
+            containerRef?.removeView(t.webView)
+            t.webView?.destroy()
+        }
+        tabs.clear()
+        openTab(PrefsManager.getHomepage(context), activate = true)
     }
 
     fun toggleDesktopMode() {
@@ -704,12 +862,54 @@ fun BrowserScreen(
         if (tabs.isEmpty()) {
             openTab(PrefsManager.getHomepage(context), activate = true)
         }
+        if (PrefsManager.shouldShowWhatsNew(context)) {
+            showWhatsNewDialog = true
+        }
+    }
+
+    // ينفّذ أوامر اختصارات التطبيق أو أيقونة موقع مثبّتة بالشاشة الرئيسية
+    val shortcutAction by ShortcutIntentState.pendingAction.collectAsState()
+    LaunchedEffect(shortcutAction) {
+        when (val action = shortcutAction) {
+            is ShortcutAction.NewTab -> {
+                openTab(PrefsManager.getHomepage(context), activate = true)
+                ShortcutIntentState.pendingAction.value = null
+            }
+            is ShortcutAction.Homepage -> {
+                activeTab?.webView?.loadUrl(PrefsManager.getHomepage(context))
+                ShortcutIntentState.pendingAction.value = null
+            }
+            is ShortcutAction.OpenUrl -> {
+                openTab(action.url, activate = true)
+                ShortcutIntentState.pendingAction.value = null
+            }
+            null -> {}
+        }
     }
 
     // يفتح الكيبورد تلقائياً لما ندخل وضع التعديل بشريط العنوان
     LaunchedEffect(addressBarEditing) {
         if (addressBarEditing) {
             addressFocusRequester.requestFocus()
+        }
+    }
+
+    // يقترح لصق رابط من الحافظة لو دخلنا وضع التعديل والحقل لسا فاضي
+    var clipboardSuggestion by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(addressBarEditing) {
+        clipboardSuggestion = null
+        if (addressBarEditing) {
+            try {
+                val clipboard = context.getSystemService(ClipboardManager::class.java)
+                val text = clipboard?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()?.trim()
+                if (!text.isNullOrBlank() && !text.contains(" ") &&
+                    (text.startsWith("http://") || text.startsWith("https://"))
+                ) {
+                    clipboardSuggestion = text
+                }
+            } catch (e: Exception) {
+                // تجاهل (حافظة فاضية أو غير نصية)
+            }
         }
     }
 
@@ -765,6 +965,9 @@ fun BrowserScreen(
         }
     }
 
+    // Box خارجي يلف كل شي عشان طبقة الفيديو بملء الشاشة (لو انفعلت) تغطي
+    // حتى الشريط العلوي وشريط العنوان، مو بس منطقة عرض الصفحة
+    Box(modifier = Modifier.fillMaxSize()) {
     Scaffold(
         topBar = {
             Column {
@@ -870,7 +1073,7 @@ fun BrowserScreen(
                                     onClick = {
                                         showOverflowMenu = false
                                         ForceDarkManager.setEnabled(context, !ForceDarkManager.isEnabled(context))
-                                        tabs.forEach { it.webView?.reload() }
+                                        tabs.forEach { recreateWebView(it) }
                                     }
                                 )
                                 DropdownMenuItem(
@@ -883,7 +1086,7 @@ fun BrowserScreen(
                                         showOverflowMenu = false
                                         val host = activeTab?.url?.let { Uri.parse(it).host }
                                         ForceDarkManager.toggleSiteExemption(context, host)
-                                        activeTab?.webView?.reload()
+                                        activeTab?.let { recreateWebView(it) }
                                     }
                                 )
                                 DropdownMenuItem(
@@ -945,6 +1148,27 @@ fun BrowserScreen(
                                     onClick = {
                                         showOverflowMenu = false
                                         onProxyLost()
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("تثبيت هذا الموقع بالشاشة الرئيسية") },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        activeTab?.let { pinSiteToHomeScreen(context, it) }
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("إحصائية حظر الإعلانات") },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        showAdBlockStatsDialog = true
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("الجديد بهذا التحديث") },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        showWhatsNewDialog = true
                                     }
                                 )
                             }
@@ -1084,6 +1308,29 @@ fun BrowserScreen(
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
+                        }
+                    }
+
+                    if (addressBarEditing && clipboardSuggestion != null) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 2.dp)
+                                .clickable {
+                                    val link = clipboardSuggestion ?: return@clickable
+                                    activeTab?.webView?.loadUrl(link)
+                                    addressBarEditing = false
+                                    clipboardSuggestion = null
+                                }
+                        ) {
+                            Text(
+                                "لصق وفتح: $clipboardSuggestion",
+                                maxLines = 1,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                            )
                         }
                     }
 
@@ -1312,6 +1559,19 @@ fun BrowserScreen(
         }
     }
 
+    fullscreenView?.let { fsView ->
+        AndroidView(
+            factory = { fsView },
+            modifier = Modifier.fillMaxSize()
+        )
+        BackHandler(enabled = true) {
+            fullscreenCallback?.onCustomViewCallback()
+            fullscreenView = null
+            fullscreenCallback = null
+        }
+    }
+    } // إغلاق الـ Box الخارجي
+
     translationResult?.let { result ->
         AlertDialog(
             onDismissRequest = { translationResult = null },
@@ -1330,6 +1590,14 @@ fun BrowserScreen(
             text = {
                 val grouped = tabs.groupBy { it.groupName ?: "" }
                 LazyColumn {
+                    item {
+                        Row(modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+                            TextButton(onClick = {
+                                activeTab?.let { closeAllTabsExcept(it.id) }
+                            }) { Text("إغلاق الكل ما عدا هذا") }
+                            TextButton(onClick = { closeAllTabs() }) { Text("إغلاق الكل") }
+                        }
+                    }
                     grouped.forEach { (group, tabsInGroup) ->
                         if (group.isNotBlank()) {
                             item {
@@ -1358,6 +1626,17 @@ fun BrowserScreen(
                                     ),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                val icon = tab.favicon
+                                if (icon != null) {
+                                    Image(
+                                        bitmap = icon.asImageBitmap(),
+                                        contentDescription = null,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                } else {
+                                    SiteAvatar(tab.title, sizeDp = 24.dp)
+                                }
+                                Spacer(modifier = Modifier.padding(start = 8.dp))
                                 Text(
                                     text = tab.title.ifBlank { "تبويب" },
                                     maxLines = 1,
@@ -1414,6 +1693,69 @@ fun BrowserScreen(
             },
             dismissButton = {
                 TextButton(onClick = { groupEditTab = null }) { Text("إلغاء") }
+            }
+        )
+    }
+
+    if (showSensitiveLoginWarning) {
+        AlertDialog(
+            onDismissRequest = { showSensitiveLoginWarning = false },
+            title = { Text("⚠️ تنبيه") },
+            text = {
+                Text(
+                    "هذي الصفحة تطلب كلمة مرور، وأنت متصل عبر بروكسي مجهول المصدر. " +
+                        "تجنّب إدخال بيانات حساسة (بنكية أو حسابات مهمة) عبر بروكسيات عامة غير موثوقة."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showSensitiveLoginWarning = false }) { Text("فهمت") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    PrefsManager.setSensitiveLoginWarningSuppressed(context, true)
+                    showSensitiveLoginWarning = false
+                }) { Text("لا تعرضه مرة ثانية") }
+            }
+        )
+    }
+
+    if (showAdBlockStatsDialog) {
+        LaunchedEffect(Unit) { AdBlockManager.persistSessionCount(context) }
+        val total = AdBlockManager.getTotalBlockedCount(context)
+        AlertDialog(
+            onDismissRequest = { showAdBlockStatsDialog = false },
+            title = { Text("إحصائية حظر الإعلانات") },
+            text = { Text("تم حظر $total طلب إعلان/تتبع منذ تثبيت التطبيق.") },
+            confirmButton = {
+                TextButton(onClick = { showAdBlockStatsDialog = false }) { Text("إغلاق") }
+            }
+        )
+    }
+
+    if (showWhatsNewDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showWhatsNewDialog = false
+                PrefsManager.markWhatsNewSeen(context)
+            },
+            title = { Text("الجديد بهذا التحديث") },
+            text = {
+                Column {
+                    Text("• إصلاح الوضع الداكن القسري للمواقع")
+                    Text("• إصلاح تدوير الشاشة (ما يعيد فتح التطبيق من جديد)")
+                    Text("• دعم تشغيل الفيديو بملء الشاشة")
+                    Text("• الصق وافتح الروابط من الحافظة مباشرة")
+                    Text("• اختصارات تطبيق وتثبيت مواقع بالشاشة الرئيسية")
+                    Text("• إحصائية حظر الإعلانات")
+                    Text("• إغلاق تبويبات بالجملة")
+                    Text("• أيقونات المواقع بالتبويبات والسجل والمفضلة")
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showWhatsNewDialog = false
+                    PrefsManager.markWhatsNewSeen(context)
+                }) { Text("تمام") }
             }
         )
     }
@@ -1550,6 +1892,8 @@ fun BrowserScreen(
                                         },
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
+                                    SiteAvatar(fav.title)
+                                    Spacer(modifier = Modifier.padding(start = 8.dp))
                                     Text(
                                         text = fav.title,
                                         maxLines = 1,
@@ -1652,6 +1996,8 @@ fun BrowserScreen(
                                         },
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
+                                    SiteAvatar(entry.title)
+                                    Spacer(modifier = Modifier.padding(start = 8.dp))
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(entry.title, maxLines = 1, style = MaterialTheme.typography.bodyMedium)
                                         Text(
@@ -1857,6 +2203,31 @@ private fun captureFullPageScreenshot(context: android.content.Context, webView:
         }
     } catch (e: Exception) {
         Toast.makeText(context, "تعذّر التقاط الصفحة", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun pinSiteToHomeScreen(context: android.content.Context, tab: TabState) {
+    try {
+        if (!ShortcutManagerCompat.isRequestPinShortcutSupported(context)) {
+            Toast.makeText(context, "جهازك ما يدعم تثبيت اختصارات بالشاشة الرئيسية", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val shortcutIntent = Intent(
+            Intent.ACTION_VIEW,
+            Uri.parse("proxybrowser://open?url=" + Uri.encode(tab.url)),
+            context,
+            MainActivity::class.java
+        )
+        val label = tab.title.ifBlank { tab.url }.take(30)
+        val shortcut = ShortcutInfoCompat.Builder(context, "site_${tab.url.hashCode()}")
+            .setShortLabel(label)
+            .setLongLabel(label)
+            .setIcon(IconCompat.createWithResource(context, R.mipmap.ic_launcher))
+            .setIntent(shortcutIntent)
+            .build()
+        ShortcutManagerCompat.requestPinShortcut(context, shortcut, null)
+    } catch (e: Exception) {
+        Toast.makeText(context, "تعذّر تثبيت الموقع", Toast.LENGTH_SHORT).show()
     }
 }
 

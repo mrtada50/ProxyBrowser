@@ -73,6 +73,36 @@ object AdBlockManager {
         return false
     }
 
+    private val sessionBlockedCount = java.util.concurrent.atomic.AtomicInteger(0)
+    private val totalBlockedCount = java.util.concurrent.atomic.AtomicLong(-1L)
+    private const val KEY_TOTAL_BLOCKED = "total_blocked_count"
+
+    fun getSessionBlockedCount(): Int = sessionBlockedCount.get()
+
+    fun getTotalBlockedCount(context: Context): Long {
+        if (totalBlockedCount.get() < 0) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            totalBlockedCount.set(prefs.getLong(KEY_TOTAL_BLOCKED, 0L))
+        }
+        return totalBlockedCount.get() + sessionBlockedCount.get()
+    }
+
+    /** يزيد العداد بالذاكرة فقط (خفيف جداً، آمن يُستدعى لكل طلب محظور). */
+    fun recordBlocked() {
+        sessionBlockedCount.incrementAndGet()
+    }
+
+    /** يحفظ إجمالي الجلسة الحالية بالتخزين الدائم — يُستدعى نادراً (مثلاً عند فتح نافذة الإحصائية)، مو لكل طلب. */
+    fun persistSessionCount(context: Context) {
+        val session = sessionBlockedCount.getAndSet(0)
+        if (session <= 0) return
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val base = if (totalBlockedCount.get() < 0) prefs.getLong(KEY_TOTAL_BLOCKED, 0L) else totalBlockedCount.get()
+        val newTotal = base + session
+        totalBlockedCount.set(newTotal)
+        prefs.edit().putLong(KEY_TOTAL_BLOCKED, newTotal).apply()
+    }
+
     private const val KEY_WHITELIST = "site_whitelist"
 
     fun isSiteWhitelisted(context: Context, host: String?): Boolean {

@@ -17,6 +17,8 @@ object PrefsManager {
     private const val KEY_DARK_THEME = "dark_theme"
     private const val KEY_TEXT_ZOOM = "text_zoom"
     private const val KEY_DATA_SAVER = "data_saver"
+    private const val KEY_WHATS_NEW_SEEN = "whats_new_seen"
+    private const val KEY_SUPPRESS_LOGIN_WARNING = "suppress_login_warning"
     private const val DEFAULT_HOMEPAGE = "https://www.google.com"
 
     fun getHomepage(context: Context): String {
@@ -57,6 +59,29 @@ object PrefsManager {
     fun setDataSaverOn(context: Context, enabled: Boolean) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putBoolean(KEY_DATA_SAVER, enabled).apply()
+    }
+
+    /** رقم يزيد يدوياً بكل دفعة ميزات جديدة، لعرض نافذة "الجديد بالتحديث" مرة وحدة. */
+    const val CURRENT_WHATS_NEW_VERSION = 3
+
+    fun shouldShowWhatsNew(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getInt(KEY_WHATS_NEW_SEEN, 0) < CURRENT_WHATS_NEW_VERSION
+    }
+
+    fun markWhatsNewSeen(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putInt(KEY_WHATS_NEW_SEEN, CURRENT_WHATS_NEW_VERSION).apply()
+    }
+
+    fun getSensitiveLoginWarningSuppressed(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_SUPPRESS_LOGIN_WARNING, false)
+    }
+
+    fun setSensitiveLoginWarningSuppressed(context: Context, suppressed: Boolean) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean(KEY_SUPPRESS_LOGIN_WARNING, suppressed).apply()
     }
 
     fun getFavorites(context: Context): List<FavoriteItem> {

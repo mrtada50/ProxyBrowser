@@ -1,3 +1,7 @@
 <resources>
     <string name="app_name">Proxy Browser</string>
+    <string name="shortcut_new_tab_short">تبويب جديد</string>
+    <string name="shortcut_new_tab_long">فتح تبويب جديد</string>
+    <string name="shortcut_homepage_short">الرئيسية</string>
+    <string name="shortcut_homepage_long">فتح الصفحة الرئيسية</string>
 </resources>

@@ -29,5 +29,11 @@ fun ScanningScreen(thresholdMs: Int) {
         CircularProgressIndicator()
         Spacer(modifier = Modifier.padding(8.dp))
         Text("جاري البحث عن بروكسي أسرع من ${thresholdMs}ms...")
+        Spacer(modifier = Modifier.padding(6.dp))
+        Text(
+            "🔒 تم قطع كل الاتصال بالكامل ريثما نجد بروكسي بديل — ما يصير أي تصفح خارج بروكسي.",
+            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+        )
     }
 }

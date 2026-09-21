@@ -23,6 +23,8 @@ import androidx.core.content.ContextCompat
 import com.proxybrowser.app.service.ProxyScanService
 import com.proxybrowser.app.state.ConnectionState
 import com.proxybrowser.app.state.ProxyState
+import com.proxybrowser.app.state.ShortcutAction
+import com.proxybrowser.app.state.ShortcutIntentState
 import com.proxybrowser.app.state.ThemeState
 import com.proxybrowser.app.ui.BrowserScreen
 import com.proxybrowser.app.ui.ScanningScreen
@@ -70,6 +72,7 @@ class MainActivity : ComponentActivity() {
         bindService(serviceIntent, connection, Context.BIND_AUTO_CREATE)
 
         ThemeState.init(applicationContext)
+        handleShortcutIntent(intent)
 
         setContent {
             val isDark by ThemeState.isDarkTheme.collectAsState()
@@ -90,6 +93,26 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                     }
+                }
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleShortcutIntent(intent)
+    }
+
+    private fun handleShortcutIntent(intent: Intent?) {
+        val data = intent?.data ?: return
+        when (data.host) {
+            "new_tab" -> ShortcutIntentState.pendingAction.value = ShortcutAction.NewTab
+            "homepage" -> ShortcutIntentState.pendingAction.value = ShortcutAction.Homepage
+            "open" -> {
+                val url = data.getQueryParameter("url")
+                if (!url.isNullOrBlank()) {
+                    ShortcutIntentState.pendingAction.value = ShortcutAction.OpenUrl(url)
                 }
             }
         }
