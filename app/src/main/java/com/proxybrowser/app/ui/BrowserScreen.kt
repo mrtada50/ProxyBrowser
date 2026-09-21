@@ -2219,10 +2219,22 @@ private fun pinSiteToHomeScreen(context: android.content.Context, tab: TabState)
             MainActivity::class.java
         )
         val label = tab.title.ifBlank { tab.url }.take(30)
+
+        // نستخدم أيقونة الموقع نفسه (favicon) إذا كانت متوفرة، وإلا نرجع
+        // لأيقونة التطبيق كبديل احتياطي
+        val siteIcon = tab.favicon?.let { fav ->
+            try {
+                val scaled = Bitmap.createScaledBitmap(fav, 108, 108, true)
+                IconCompat.createWithBitmap(scaled)
+            } catch (e: Exception) {
+                null
+            }
+        } ?: IconCompat.createWithResource(context, R.mipmap.ic_launcher)
+
         val shortcut = ShortcutInfoCompat.Builder(context, "site_${tab.url.hashCode()}")
             .setShortLabel(label)
             .setLongLabel(label)
-            .setIcon(IconCompat.createWithResource(context, R.mipmap.ic_launcher))
+            .setIcon(siteIcon)
             .setIntent(shortcutIntent)
             .build()
         ShortcutManagerCompat.requestPinShortcut(context, shortcut, null)
