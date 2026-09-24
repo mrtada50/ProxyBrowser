@@ -302,6 +302,37 @@ private fun SiteAvatar(label: String, sizeDp: androidx.compose.ui.unit.Dp = 28.d
     }
 }
 
+private fun isOnWifi(context: android.content.Context): Boolean {
+    return try {
+        val cm = context.getSystemService(android.net.ConnectivityManager::class.java)
+        val network = cm?.activeNetwork ?: return false
+        val capabilities = cm.getNetworkCapabilities(network) ?: return false
+        capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+    } catch (e: Exception) {
+        false
+    }
+}
+
+/** قياس بينج حي فعلي عبر البروكسي الحالي (طلب خفيف لجوجل، يقيس زمن الاستجابة فقط). */
+private suspend fun measureLivePing(proxyInfo: ProxyInfo): Long? = withContext(Dispatchers.IO) {
+    try {
+        val type = if (proxyInfo.type == ProxyType.SOCKS5) java.net.Proxy.Type.SOCKS else java.net.Proxy.Type.HTTP
+        val javaProxy = java.net.Proxy(type, java.net.InetSocketAddress(proxyInfo.host, proxyInfo.port))
+        val client = okhttp3.OkHttpClient.Builder()
+            .proxy(javaProxy)
+            .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+        val request = okhttp3.Request.Builder().url("https://www.google.com/generate_204").build()
+        val start = System.currentTimeMillis()
+        client.newCall(request).execute().use { response ->
+            if (response.isSuccessful) System.currentTimeMillis() - start else null
+        }
+    } catch (e: Exception) {
+        null
+    }
+}
+
 private fun permissionLabel(resource: String): String = when (resource) {
     PermissionRequest.RESOURCE_VIDEO_CAPTURE -> "الكاميرا"
     PermissionRequest.RESOURCE_AUDIO_CAPTURE -> "المايكروفون"
@@ -379,6 +410,7 @@ fun BrowserScreen(
     var proxyReady by remember { mutableStateOf(false) }
     var proxySupported by remember { mutableStateOf(true) }
     var isProxyOn by remember { mutableStateOf(true) }
+    var livePingMs by remember { mutableStateOf<Long?>(null) }
     var lostTriggered by remember { mutableStateOf(false) }
 
     var showSettingsDialog by remember { mutableStateOf(false) }
@@ -887,6 +919,19 @@ fun BrowserScreen(
         }
     }
 
+    // بينج حي فعلي، بس أثناء الواي فاي — على بيانات الجوال نبقي الرقم الثابت
+    // من الفحص الأول كما هو (توفيراً للبيانات والبطارية)
+    LaunchedEffect(isProxyOn, proxy) {
+        while (true) {
+            if (isProxyOn && isOnWifi(context)) {
+                livePingMs = measureLivePing(proxy)
+            } else {
+                livePingMs = null
+            }
+            delay(4000)
+        }
+    }
+
     // يفتح الكيبورد تلقائياً لما ندخل وضع التعديل بشريط العنوان
     LaunchedEffect(addressBarEditing) {
         if (addressBarEditing) {
@@ -977,7 +1022,10 @@ fun BrowserScreen(
                         val isBypassed = ProxyBypassManager.isBypassed(context, currentHost)
                         val status = when {
                             isBypassed -> "بدون بروكسي (استثناء لهذا الموقع)"
-                            isProxyOn -> "${proxy.host}:${proxy.port} • ${proxy.latencyMs}ms"
+                            isProxyOn -> {
+                                val pingText = livePingMs?.let { "${it}ms 📶" } ?: "${proxy.latencyMs}ms"
+                                "${proxy.host}:${proxy.port} • $pingText"
+                            }
                             else -> "اتصال مباشر"
                         }
                         Text(status, style = MaterialTheme.typography.titleSmall)
