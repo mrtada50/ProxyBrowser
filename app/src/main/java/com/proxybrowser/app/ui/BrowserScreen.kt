@@ -54,6 +54,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -139,6 +140,7 @@ import com.proxybrowser.app.data.HistoryEntry
 import com.proxybrowser.app.data.HistoryManager
 import com.proxybrowser.app.data.PrefsManager
 import com.proxybrowser.app.data.ProxyBypassManager
+import com.proxybrowser.app.data.UiPrefsManager
 import com.proxybrowser.app.model.ProxyInfo
 import com.proxybrowser.app.model.ProxyType
 import com.proxybrowser.app.state.ThemeState
@@ -411,6 +413,30 @@ fun BrowserScreen(
     var proxySupported by remember { mutableStateOf(true) }
     var isProxyOn by remember { mutableStateOf(true) }
     var livePingMs by remember { mutableStateOf<Long?>(null) }
+
+    var showUiCustomizeDialog by remember { mutableStateOf(false) }
+    var addressBarPosition by remember { mutableStateOf(UiPrefsManager.getAddressBarPosition(context)) }
+    var addressBarShape by remember { mutableStateOf(UiPrefsManager.getAddressBarShape(context)) }
+    var uiScale by remember { mutableStateOf(UiPrefsManager.getUiScale(context)) }
+    var toolbarOrder by remember { mutableStateOf(UiPrefsManager.getToolbarOrder(context)) }
+    var toolbarHidden by remember { mutableStateOf(UiPrefsManager.getToolbarHidden(context)) }
+
+    val addressBarCorner = if (addressBarShape == "square") 4.dp else 20.dp
+    val iconButtonSize = when (uiScale) {
+        "compact" -> 36.dp
+        "comfortable" -> 52.dp
+        else -> 44.dp
+    }
+    val iconGlyphSize = when (uiScale) {
+        "compact" -> 18.dp
+        "comfortable" -> 26.dp
+        else -> 22.dp
+    }
+    val addressBarVPad = when (uiScale) {
+        "compact" -> 3.dp
+        "comfortable" -> 10.dp
+        else -> 6.dp
+    }
     var lostTriggered by remember { mutableStateOf(false) }
 
     var showSettingsDialog by remember { mutableStateOf(false) }
@@ -1013,6 +1039,333 @@ fun BrowserScreen(
     // Box خارجي يلف كل شي عشان طبقة الفيديو بملء الشاشة (لو انفعلت) تغطي
     // حتى الشريط العلوي وشريط العنوان، مو بس منطقة عرض الصفحة
     Box(modifier = Modifier.fillMaxSize()) {
+    val toolbarContent: @Composable () -> Unit = {
+                // شريط عنوان الموقع لوحده — مستطيل مدوّر بعرض الشاشة كامل
+                Column {
+                    Surface(
+                        shape = RoundedCornerShape(addressBarCorner),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = addressBarVPad),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val isHttps = activeTab?.url?.startsWith("https://") == true
+                            IconButton(
+                                onClick = { showSecurityDialog = true },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (isHttps) Icons.Filled.Lock else Icons.Filled.LockOpen,
+                                    contentDescription = "تفاصيل الاتصال",
+                                    modifier = Modifier.size(16.dp),
+                                    tint = if (isHttps) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                                )
+                            }
+
+                            if (addressBarEditing) {
+                                var hasBeenFocused by remember(activeTabId) { mutableStateOf(false) }
+                                BasicTextField(
+                                    value = addressBarInput,
+                                    onValueChange = { addressBarInput = it },
+                                    singleLine = true,
+                                    textStyle = MaterialTheme.typography.bodyMedium.copy(
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    ),
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                                    keyboardActions = KeyboardActions(onGo = {
+                                        activeTab?.webView?.loadUrl(resolveAddressInput(addressBarInput))
+                                        addressBarEditing = false
+                                        suggestions = emptyList()
+                                    }),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(start = 6.dp)
+                                        .focusRequester(addressFocusRequester)
+                                        .onFocusChanged { state ->
+                                            if (state.isFocused) {
+                                                hasBeenFocused = true
+                                            } else if (hasBeenFocused) {
+                                                // ضغط بمكان ثاني (فقدان التركيز) — نرجع للوضع الطبيعي
+                                                addressBarEditing = false
+                                                suggestions = emptyList()
+                                            }
+                                        }
+                                )
+                                IconButton(
+                                    onClick = {
+                                        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                            putExtra(
+                                                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                                                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                                            )
+                                        }
+                                        try {
+                                            voiceLauncher.launch(intent)
+                                        } catch (e: Exception) {
+                                            Toast.makeText(context, "البحث الصوتي غير متوفر بجهازك", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(Icons.Filled.Mic, contentDescription = "بحث صوتي", modifier = Modifier.size(16.dp))
+                                }
+                                IconButton(
+                                    onClick = {
+                                        qrLauncher.launch(
+                                            ScanOptions()
+                                                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                                                .setPrompt("وجّه الكاميرا نحو رمز QR")
+                                                .setBeepEnabled(false)
+                                        )
+                                    },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(Icons.Filled.QrCodeScanner, contentDescription = "مسح QR", modifier = Modifier.size(16.dp))
+                                }
+                            } else {
+                                Text(
+                                    text = (activeTab?.title?.ifBlank { null } ?: addressBarText).ifBlank { "ابحث أو اكتب رابط" },
+                                    maxLines = 1,
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    ),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(start = 6.dp)
+                                        .clickable {
+                                            addressBarInput = ""
+                                            addressBarEditing = true
+                                        }
+                                )
+                                IconButton(
+                                    onClick = {
+                                        addressBarInput = addressBarText
+                                        addressBarEditing = true
+                                    },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Edit,
+                                        contentDescription = "تعديل الرابط مباشرة",
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                }
+                            }
+
+                            IconButton(
+                                onClick = {
+                                    val current = activeTab?.url
+                                    if (!current.isNullOrBlank()) {
+                                        activeTab?.webView?.loadUrl(buildGoogleTranslateUrl(current))
+                                    }
+                                },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(
+                                    Icons.Filled.Translate,
+                                    contentDescription = "ترجمة الصفحة",
+                                    modifier = Modifier.size(18.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+
+                    if (addressBarEditing && clipboardSuggestion != null) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 2.dp)
+                                .clickable {
+                                    val link = clipboardSuggestion ?: return@clickable
+                                    activeTab?.webView?.loadUrl(link)
+                                    addressBarEditing = false
+                                    clipboardSuggestion = null
+                                }
+                        ) {
+                            Text(
+                                "لصق وفتح: $clipboardSuggestion",
+                                maxLines = 1,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                            )
+                        }
+                    }
+
+                    if (addressBarEditing && suggestions.isNotEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                            tonalElevation = 4.dp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp)
+                        ) {
+                            Column {
+                                suggestions.take(6).forEach { suggestion ->
+                                    Text(
+                                        text = suggestion,
+                                        maxLines = 1,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                activeTab?.webView?.loadUrl(resolveAddressInput(suggestion))
+                                                addressBarEditing = false
+                                                suggestions = emptyList()
+                                            }
+                                            .padding(horizontal = 16.dp, vertical = 10.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if ((activeTab?.progress ?: 100) in 1..99) {
+                    LinearProgressIndicator(
+                        progress = { (activeTab?.progress ?: 100) / 100f },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+
+                // صف أزرار التنقل + مربع عدد التبويبات + المفضلة
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    toolbarOrder.forEach { id ->
+                        if (id in toolbarHidden) return@forEach
+                        when (id) {
+                            "back" -> IconButton(
+                                onClick = { activeTab?.webView?.goBack() },
+                                modifier = Modifier.size(iconButtonSize)
+                            ) {
+                                Icon(Icons.Filled.ArrowBack, contentDescription = "رجوع", modifier = Modifier.size(iconGlyphSize))
+                            }
+                            "forward" -> IconButton(
+                                onClick = { activeTab?.webView?.goForward() },
+                                modifier = Modifier.size(iconButtonSize)
+                            ) {
+                                Icon(Icons.Filled.ArrowForward, contentDescription = "تقدم", modifier = Modifier.size(iconGlyphSize))
+                            }
+                            "refresh" -> IconButton(
+                                onClick = { activeTab?.webView?.reload() },
+                                modifier = Modifier.size(iconButtonSize)
+                            ) {
+                                Icon(Icons.Filled.Refresh, contentDescription = "تحديث", modifier = Modifier.size(iconGlyphSize))
+                            }
+                            "home" -> IconButton(
+                                onClick = {
+                                    val home = PrefsManager.getHomepage(context)
+                                    activeTab?.webView?.loadUrl(home)
+                                },
+                                modifier = Modifier.size(iconButtonSize)
+                            ) {
+                                Icon(Icons.Filled.Home, contentDescription = "الرئيسية", modifier = Modifier.size(iconGlyphSize))
+                            }
+                            "star" -> IconButton(
+                                onClick = {
+                                    PrefsManager.addFavorite(context, activeTab?.title ?: addressBarText, addressBarText)
+                                    favorites = PrefsManager.getFavorites(context)
+                                },
+                                modifier = Modifier.size(iconButtonSize)
+                            ) {
+                                Icon(Icons.Filled.Star, contentDescription = "إضافة للمفضلة", modifier = Modifier.size(iconGlyphSize))
+                            }
+                            "favorites" -> IconButton(
+                                onClick = {
+                                    favorites = PrefsManager.getFavorites(context)
+                                    favoritesQuery = ""
+                                    showFavoritesDialog = true
+                                },
+                                modifier = Modifier.size(iconButtonSize)
+                            ) {
+                                Icon(Icons.Filled.List, contentDescription = "المفضلة", modifier = Modifier.size(iconGlyphSize))
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.weight(1f))
+
+                    if ((activeTab?.mediaLinks?.size ?: 0) > 0) {
+                        IconButton(onClick = { showMediaDialog = true }, modifier = Modifier.size(iconButtonSize)) {
+                            Icon(
+                                Icons.Filled.PlayCircle,
+                                contentDescription = "مقاطع مكتشفة بالصفحة",
+                                modifier = Modifier.size(iconGlyphSize),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+
+                    // مربع صغير فيه رقم عدد التبويبات — الضغط عليه يفتح قائمة التبويبات
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier
+                            .padding(horizontal = 6.dp)
+                            .size(iconButtonSize.coerceAtLeast(32.dp))
+                            .clickable { showTabsDialog = true }
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(
+                                text = tabs.size.toString(),
+                                fontSize = 14.sp,
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                        }
+                    }
+                }
+
+                if (showFindBar) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = findQuery,
+                            onValueChange = {
+                                findQuery = it
+                                activeTab?.webView?.findAllAsync(it)
+                            },
+                            singleLine = true,
+                            placeholder = { Text("بحث بالصفحة") },
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            findMatchInfo,
+                            modifier = Modifier.padding(horizontal = 8.dp),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        IconButton(onClick = { activeTab?.webView?.findNext(false) }) {
+                            Icon(Icons.Filled.ArrowBack, contentDescription = "السابق")
+                        }
+                        IconButton(onClick = { activeTab?.webView?.findNext(true) }) {
+                            Icon(Icons.Filled.ArrowForward, contentDescription = "التالي")
+                        }
+                        IconButton(onClick = {
+                            activeTab?.webView?.clearMatches()
+                            showFindBar = false
+                            findQuery = ""
+                            findMatchInfo = ""
+                        }) {
+                            Icon(Icons.Filled.Close, contentDescription = "إغلاق البحث")
+                        }
+                    }
+                }
+    }
+
     Scaffold(
         topBar = {
             Column {
@@ -1219,311 +1572,27 @@ fun BrowserScreen(
                                         showWhatsNewDialog = true
                                     }
                                 )
+                                DropdownMenuItem(
+                                    text = { Text("تخصيص الواجهة") },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        showUiCustomizeDialog = true
+                                    }
+                                )
                             }
                         }
                     }
                 )
 
-                // شريط عنوان الموقع لوحده — مستطيل مدوّر بعرض الشاشة كامل
+                if (addressBarPosition == "top") {
+                    toolbarContent()
+                }
+            }
+        },
+        bottomBar = {
+            if (addressBarPosition == "bottom") {
                 Column {
-                    Surface(
-                        shape = RoundedCornerShape(20.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            val isHttps = activeTab?.url?.startsWith("https://") == true
-                            IconButton(
-                                onClick = { showSecurityDialog = true },
-                                modifier = Modifier.size(28.dp)
-                            ) {
-                                Icon(
-                                    imageVector = if (isHttps) Icons.Filled.Lock else Icons.Filled.LockOpen,
-                                    contentDescription = "تفاصيل الاتصال",
-                                    modifier = Modifier.size(16.dp),
-                                    tint = if (isHttps) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
-                                )
-                            }
-
-                            if (addressBarEditing) {
-                                var hasBeenFocused by remember(activeTabId) { mutableStateOf(false) }
-                                BasicTextField(
-                                    value = addressBarInput,
-                                    onValueChange = { addressBarInput = it },
-                                    singleLine = true,
-                                    textStyle = MaterialTheme.typography.bodyMedium.copy(
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    ),
-                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                                    keyboardActions = KeyboardActions(onGo = {
-                                        activeTab?.webView?.loadUrl(resolveAddressInput(addressBarInput))
-                                        addressBarEditing = false
-                                        suggestions = emptyList()
-                                    }),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .padding(start = 6.dp)
-                                        .focusRequester(addressFocusRequester)
-                                        .onFocusChanged { state ->
-                                            if (state.isFocused) {
-                                                hasBeenFocused = true
-                                            } else if (hasBeenFocused) {
-                                                // ضغط بمكان ثاني (فقدان التركيز) — نرجع للوضع الطبيعي
-                                                addressBarEditing = false
-                                                suggestions = emptyList()
-                                            }
-                                        }
-                                )
-                                IconButton(
-                                    onClick = {
-                                        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                                            putExtra(
-                                                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                                                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-                                            )
-                                        }
-                                        try {
-                                            voiceLauncher.launch(intent)
-                                        } catch (e: Exception) {
-                                            Toast.makeText(context, "البحث الصوتي غير متوفر بجهازك", Toast.LENGTH_SHORT).show()
-                                        }
-                                    },
-                                    modifier = Modifier.size(28.dp)
-                                ) {
-                                    Icon(Icons.Filled.Mic, contentDescription = "بحث صوتي", modifier = Modifier.size(16.dp))
-                                }
-                                IconButton(
-                                    onClick = {
-                                        qrLauncher.launch(
-                                            ScanOptions()
-                                                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                                                .setPrompt("وجّه الكاميرا نحو رمز QR")
-                                                .setBeepEnabled(false)
-                                        )
-                                    },
-                                    modifier = Modifier.size(28.dp)
-                                ) {
-                                    Icon(Icons.Filled.QrCodeScanner, contentDescription = "مسح QR", modifier = Modifier.size(16.dp))
-                                }
-                            } else {
-                                Text(
-                                    text = (activeTab?.title?.ifBlank { null } ?: addressBarText).ifBlank { "ابحث أو اكتب رابط" },
-                                    maxLines = 1,
-                                    style = MaterialTheme.typography.bodyMedium.copy(
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    ),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .padding(start = 6.dp)
-                                        .clickable {
-                                            addressBarInput = ""
-                                            addressBarEditing = true
-                                        }
-                                )
-                                IconButton(
-                                    onClick = {
-                                        addressBarInput = addressBarText
-                                        addressBarEditing = true
-                                    },
-                                    modifier = Modifier.size(28.dp)
-                                ) {
-                                    Icon(
-                                        Icons.Filled.Edit,
-                                        contentDescription = "تعديل الرابط مباشرة",
-                                        modifier = Modifier.size(15.dp)
-                                    )
-                                }
-                            }
-
-                            IconButton(
-                                onClick = {
-                                    val current = activeTab?.url
-                                    if (!current.isNullOrBlank()) {
-                                        activeTab?.webView?.loadUrl(buildGoogleTranslateUrl(current))
-                                    }
-                                },
-                                modifier = Modifier.size(32.dp)
-                            ) {
-                                Icon(
-                                    Icons.Filled.Translate,
-                                    contentDescription = "ترجمة الصفحة",
-                                    modifier = Modifier.size(18.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                    }
-
-                    if (addressBarEditing && clipboardSuggestion != null) {
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.secondaryContainer,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 10.dp, vertical = 2.dp)
-                                .clickable {
-                                    val link = clipboardSuggestion ?: return@clickable
-                                    activeTab?.webView?.loadUrl(link)
-                                    addressBarEditing = false
-                                    clipboardSuggestion = null
-                                }
-                        ) {
-                            Text(
-                                "لصق وفتح: $clipboardSuggestion",
-                                maxLines = 1,
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
-                            )
-                        }
-                    }
-
-                    if (addressBarEditing && suggestions.isNotEmpty()) {
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.surface,
-                            tonalElevation = 4.dp,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 10.dp)
-                        ) {
-                            Column {
-                                suggestions.take(6).forEach { suggestion ->
-                                    Text(
-                                        text = suggestion,
-                                        maxLines = 1,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clickable {
-                                                activeTab?.webView?.loadUrl(resolveAddressInput(suggestion))
-                                                addressBarEditing = false
-                                                suggestions = emptyList()
-                                            }
-                                            .padding(horizontal = 16.dp, vertical = 10.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if ((activeTab?.progress ?: 100) in 1..99) {
-                    LinearProgressIndicator(
-                        progress = { (activeTab?.progress ?: 100) / 100f },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-
-                // صف أزرار التنقل + مربع عدد التبويبات + المفضلة
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 4.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    IconButton(onClick = { activeTab?.webView?.goBack() }) {
-                        Icon(Icons.Filled.ArrowBack, contentDescription = "رجوع")
-                    }
-                    IconButton(onClick = { activeTab?.webView?.goForward() }) {
-                        Icon(Icons.Filled.ArrowForward, contentDescription = "تقدم")
-                    }
-                    IconButton(onClick = { activeTab?.webView?.reload() }) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "تحديث")
-                    }
-                    IconButton(onClick = {
-                        val home = PrefsManager.getHomepage(context)
-                        activeTab?.webView?.loadUrl(home)
-                    }) {
-                        Icon(Icons.Filled.Home, contentDescription = "الرئيسية")
-                    }
-
-                    Spacer(modifier = Modifier.weight(1f))
-
-                    if ((activeTab?.mediaLinks?.size ?: 0) > 0) {
-                        IconButton(onClick = { showMediaDialog = true }) {
-                            Icon(
-                                Icons.Filled.PlayCircle,
-                                contentDescription = "مقاطع مكتشفة بالصفحة",
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                    }
-
-                    IconButton(onClick = {
-                        PrefsManager.addFavorite(context, activeTab?.title ?: addressBarText, addressBarText)
-                        favorites = PrefsManager.getFavorites(context)
-                    }) {
-                        Icon(Icons.Filled.Star, contentDescription = "إضافة للمفضلة")
-                    }
-                    IconButton(onClick = {
-                        favorites = PrefsManager.getFavorites(context)
-                        favoritesQuery = ""
-                        showFavoritesDialog = true
-                    }) {
-                        Icon(Icons.Filled.List, contentDescription = "المفضلة")
-                    }
-
-                    // مربع صغير فيه رقم عدد التبويبات — الضغط عليه يفتح قائمة التبويبات
-                    Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        modifier = Modifier
-                            .padding(horizontal = 6.dp)
-                            .size(32.dp)
-                            .clickable { showTabsDialog = true }
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Text(
-                                text = tabs.size.toString(),
-                                fontSize = 14.sp,
-                                style = MaterialTheme.typography.labelLarge
-                            )
-                        }
-                    }
-                }
-
-                if (showFindBar) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 10.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = findQuery,
-                            onValueChange = {
-                                findQuery = it
-                                activeTab?.webView?.findAllAsync(it)
-                            },
-                            singleLine = true,
-                            placeholder = { Text("بحث بالصفحة") },
-                            modifier = Modifier.weight(1f)
-                        )
-                        Text(
-                            findMatchInfo,
-                            modifier = Modifier.padding(horizontal = 8.dp),
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        IconButton(onClick = { activeTab?.webView?.findNext(false) }) {
-                            Icon(Icons.Filled.ArrowBack, contentDescription = "السابق")
-                        }
-                        IconButton(onClick = { activeTab?.webView?.findNext(true) }) {
-                            Icon(Icons.Filled.ArrowForward, contentDescription = "التالي")
-                        }
-                        IconButton(onClick = {
-                            activeTab?.webView?.clearMatches()
-                            showFindBar = false
-                            findQuery = ""
-                            findMatchInfo = ""
-                        }) {
-                            Icon(Icons.Filled.Close, contentDescription = "إغلاق البحث")
-                        }
-                    }
+                    toolbarContent()
                 }
             }
         }
@@ -1776,6 +1845,122 @@ fun BrowserScreen(
             text = { Text("تم حظر $total طلب إعلان/تتبع منذ تثبيت التطبيق.") },
             confirmButton = {
                 TextButton(onClick = { showAdBlockStatsDialog = false }) { Text("إغلاق") }
+            }
+        )
+    }
+
+    if (showUiCustomizeDialog) {
+        AlertDialog(
+            onDismissRequest = { showUiCustomizeDialog = false },
+            title = { Text("تخصيص الواجهة") },
+            text = {
+                LazyColumn {
+                    item {
+                        Text("مكان شريط العنوان", style = MaterialTheme.typography.labelMedium)
+                        Row(modifier = Modifier.padding(vertical = 4.dp)) {
+                            TextButton(onClick = {
+                                addressBarPosition = "top"
+                                UiPrefsManager.setAddressBarPosition(context, "top")
+                            }) { Text(if (addressBarPosition == "top") "✓ أعلى" else "أعلى") }
+                            TextButton(onClick = {
+                                addressBarPosition = "bottom"
+                                UiPrefsManager.setAddressBarPosition(context, "bottom")
+                            }) { Text(if (addressBarPosition == "bottom") "✓ أسفل" else "أسفل") }
+                        }
+
+                        Spacer(modifier = Modifier.padding(top = 10.dp))
+                        Text("شكل شريط العنوان", style = MaterialTheme.typography.labelMedium)
+                        Row(modifier = Modifier.padding(vertical = 4.dp)) {
+                            TextButton(onClick = {
+                                addressBarShape = "rounded"
+                                UiPrefsManager.setAddressBarShape(context, "rounded")
+                            }) { Text(if (addressBarShape == "rounded") "✓ مستدير" else "مستدير") }
+                            TextButton(onClick = {
+                                addressBarShape = "square"
+                                UiPrefsManager.setAddressBarShape(context, "square")
+                            }) { Text(if (addressBarShape == "square") "✓ مربع" else "مربع") }
+                        }
+
+                        Spacer(modifier = Modifier.padding(top = 10.dp))
+                        Text("حجم عناصر الواجهة", style = MaterialTheme.typography.labelMedium)
+                        Row(modifier = Modifier.padding(vertical = 4.dp)) {
+                            listOf("compact" to "مضغوط", "normal" to "عادي", "comfortable" to "مريح").forEach { (key, label) ->
+                                TextButton(onClick = {
+                                    uiScale = key
+                                    UiPrefsManager.setUiScale(context, key)
+                                }) { Text(if (uiScale == key) "✓ $label" else label) }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.padding(top = 12.dp))
+                        Text("أزرار شريط الأدوات (ترتيب/إخفاء)", style = MaterialTheme.typography.labelMedium)
+                        Text(
+                            "اضغط ↑↓ لتغيير الترتيب، وعلّم/أزل العلامة لإظهار أو إخفاء الزر",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    itemsIndexed(toolbarOrder) { index, id ->
+                        val isHidden = id in toolbarHidden
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(
+                                onClick = {
+                                    if (index > 0) {
+                                        val newOrder = toolbarOrder.toMutableList()
+                                        val tmp = newOrder[index - 1]
+                                        newOrder[index - 1] = newOrder[index]
+                                        newOrder[index] = tmp
+                                        toolbarOrder = newOrder
+                                        UiPrefsManager.setToolbarOrder(context, newOrder)
+                                    }
+                                },
+                                enabled = index > 0,
+                                modifier = Modifier.size(32.dp)
+                            ) { Text("↑") }
+                            IconButton(
+                                onClick = {
+                                    if (index < toolbarOrder.size - 1) {
+                                        val newOrder = toolbarOrder.toMutableList()
+                                        val tmp = newOrder[index + 1]
+                                        newOrder[index + 1] = newOrder[index]
+                                        newOrder[index] = tmp
+                                        toolbarOrder = newOrder
+                                        UiPrefsManager.setToolbarOrder(context, newOrder)
+                                    }
+                                },
+                                enabled = index < toolbarOrder.size - 1,
+                                modifier = Modifier.size(32.dp)
+                            ) { Text("↓") }
+                            Text(
+                                UiPrefsManager.TOOLBAR_LABELS[id] ?: id,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(start = 8.dp),
+                                style = if (isHidden) {
+                                    MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                } else {
+                                    MaterialTheme.typography.bodyMedium
+                                }
+                            )
+                            TextButton(onClick = {
+                                val newHidden = toolbarHidden.toMutableSet()
+                                if (isHidden) newHidden.remove(id) else newHidden.add(id)
+                                toolbarHidden = newHidden
+                                UiPrefsManager.setToolbarHidden(context, newHidden)
+                            }) {
+                                Text(if (isHidden) "إظهار" else "إخفاء")
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showUiCustomizeDialog = false }) { Text("تم") }
             }
         )
     }
