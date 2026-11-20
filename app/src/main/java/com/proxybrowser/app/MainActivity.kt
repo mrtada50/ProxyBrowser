@@ -12,22 +12,22 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
+import com.proxybrowser.app.data.PrefsManager
 import com.proxybrowser.app.service.ProxyScanService
 import com.proxybrowser.app.state.ConnectionState
 import com.proxybrowser.app.state.ProxyState
 import com.proxybrowser.app.state.ShortcutAction
 import com.proxybrowser.app.state.ShortcutIntentState
+import com.proxybrowser.app.state.TabSession
 import com.proxybrowser.app.state.ThemeState
 import com.proxybrowser.app.ui.BrowserScreen
 import com.proxybrowser.app.ui.ScanningScreen
+import com.proxybrowser.app.ui.theme.ProxyBrowserTheme
 
 class MainActivity : ComponentActivity() {
 
@@ -38,12 +38,10 @@ class MainActivity : ComponentActivity() {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             val binder = service as ProxyScanService.LocalBinder
             scanService = binder.getService()
-            bound = true
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
             scanService = null
-            bound = false
         }
     }
 
@@ -66,35 +64,82 @@ class MainActivity : ComponentActivity() {
             arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
         )
 
-        // نشغّل خدمة الفحص كـ Foreground Service عشان تستمر حتى لو المستخدم طلع من التطبيق
-        val serviceIntent = Intent(this, ProxyScanService::class.java)
-        ContextCompat.startForegroundService(this, serviceIntent)
-        bindService(serviceIntent, connection, Context.BIND_AUTO_CREATE)
+        // نطابق الحالة مع اختيار المستخدم المحفوظ: لو كان موقف البروكسي يدوياً
+        // ما نشغّل أي فحص أو خدمة، ونروح مباشرة للمتصفح باتصال مباشر
+        // فتح جديد للتطبيق (مو مجرد تبديل حالة) يبدأ بتبويب نظيف مثل قبل
+        if (savedInstanceState == null) TabSession.urls = emptyList()
+        ProxyState.syncWithPrefs(applicationContext)
+        if (PrefsManager.isProxyEnabled(applicationContext)) {
+            startProxyService()
+        }
 
         ThemeState.init(applicationContext)
         handleShortcutIntent(intent)
 
         setContent {
             val isDark by ThemeState.isDarkTheme.collectAsState()
-            MaterialTheme(
-                colorScheme = if (isDark) darkColorScheme() else lightColorScheme()
-            ) {
+            ProxyBrowserTheme(darkTheme = isDark) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     val state by ProxyState.connectionState.collectAsState()
 
                     when (val current = state) {
                         is ConnectionState.Scanning -> {
-                            ScanningScreen(thresholdMs = current.thresholdMs)
+                            ScanningScreen(
+                                thresholdMs = current.thresholdMs,
+                                onDisableProxy = { setProxyEnabled(false) }
+                            )
                         }
-                        is ConnectionState.Connected -> {
+                        else -> {
+                            // نفس موضع BrowserScreen بحالتي (متصل / موقوف) عشان التبويبات
+                            // ما تضيع لما المستخدم يوقف البروكسي أو يبدّل بين الحالتين
                             BrowserScreen(
-                                proxy = current.proxy,
-                                onProxyLost = { scanService?.rescan() }
+                                proxy = (current as? ConnectionState.Connected)?.proxy,
+                                onProxyLost = { scanService?.rescan() },
+                                onSetProxyEnabled = { enabled -> setProxyEnabled(enabled) }
                             )
                         }
                     }
                 }
             }
+        }
+    }
+
+    /** يشغّل خدمة الفحص كـ Foreground Service ويربط بها (تستمر حتى لو طلع المستخدم من التطبيق). */
+    private fun startProxyService() {
+        val serviceIntent = Intent(this, ProxyScanService::class.java)
+        ContextCompat.startForegroundService(this, serviceIntent)
+        if (!bound) {
+            bound = bindService(serviceIntent, connection, Context.BIND_AUTO_CREATE)
+        }
+    }
+
+    /** يوقف الفحص والخدمة تماماً (ويشيل الإشعار). */
+    private fun stopProxyService() {
+        scanService?.shutdown()
+        if (bound) {
+            try {
+                unbindService(connection)
+            } catch (e: IllegalArgumentException) {
+                // الربط مو موجود أصلاً — نتجاهل
+            }
+            bound = false
+        }
+        scanService = null
+        stopService(Intent(this, ProxyScanService::class.java))
+    }
+
+    /**
+     * تشغيل/إيقاف البروكسي بالكامل. الاختيار يتحفظ، فلو أوقفه المستخدم يبقى موقوفاً
+     * حتى بعد إغلاق التطبيق، ولا يرجع يشتغل إلا لما يضغط "تفعيل" بنفسه.
+     */
+    private fun setProxyEnabled(enabled: Boolean) {
+        PrefsManager.setProxyEnabled(applicationContext, enabled)
+        if (enabled) {
+            ProxyState.connectionState.value = ConnectionState.Scanning(ProxyState.START_THRESHOLD_MS)
+            startProxyService()
+        } else {
+            stopProxyService()
+            ProxyState.connectionState.value = ConnectionState.Disabled
         }
     }
 

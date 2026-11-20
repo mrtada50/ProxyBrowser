@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.proxybrowser.app.MainActivity
+import com.proxybrowser.app.data.PrefsManager
 import com.proxybrowser.app.data.ProxyHistoryManager
 import com.proxybrowser.app.model.ProxyInfo
 import com.proxybrowser.app.network.ProxyFetcher
@@ -41,6 +42,11 @@ class ProxyScanService : Service() {
 
     private val binder = LocalBinder()
 
+    /** صار true لما المستخدم يوقف البروكسي، عشان ما يرجع إشعار أو اتصال بعد الإيقاف. */
+    @Volatile
+    private var stopped = false
+    private var lastStatus = "جاري البحث عن بروكسي..."
+
     inner class LocalBinder : Binder() {
         fun getService(): ProxyScanService = this@ProxyScanService
     }
@@ -50,18 +56,43 @@ class ProxyScanService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("جاري البحث عن بروكسي..."))
+        // لازم startForeground بعد أي startForegroundService وإلا يطيح التطبيق،
+        // حتى لو بنوقف الخدمة فوراً لأن المستخدم موقف البروكسي
+        startForeground(NOTIFICATION_ID, buildNotification(lastStatus))
+        if (!PrefsManager.isProxyEnabled(this)) {
+            shutdown()
+            return
+        }
         startScanLoop()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startForeground(NOTIFICATION_ID, buildNotification(lastStatus))
+        if (!PrefsManager.isProxyEnabled(this)) {
+            shutdown()
+            return START_NOT_STICKY
+        }
+        stopped = false
         startScanLoop()
         return START_STICKY
+    }
+
+    /**
+     * إيقاف كامل: يلغي الفحص ويشيل الإشعار ويوقف الخدمة نفسها.
+     * يُستدعى لما المستخدم يوقف البروكسي من التطبيق.
+     */
+    fun shutdown() {
+        stopped = true
+        scanJob?.cancel()
+        scanJob = null
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     /** يوقف كل شي تماماً (الفحص + الخدمة نفسها) لما المستخدم يحذف التطبيق من التطبيقات المفتوحة. */
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
+        stopped = true
         scanJob?.cancel()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -69,6 +100,8 @@ class ProxyScanService : Service() {
 
     /** يعيد بدء البحث من الصفر (يُستدعى لما ينقطع البروكسي أثناء التصفح). */
     fun rescan() {
+        // لو البروكسي موقوف يدوياً ما نعيد الفحص أبداً
+        if (stopped || !PrefsManager.isProxyEnabled(this)) return
         scanJob?.cancel()
         ProxyState.connectionState.value = ConnectionState.Scanning(START_THRESHOLD_MS)
         startScanLoop()
@@ -110,6 +143,8 @@ class ProxyScanService : Service() {
             }
 
             val connectedProxy = found ?: return@launch
+            // لو المستخدم أوقف البروكسي أثناء الفحص ما ننشر اتصال جديد
+            if (stopped || !PrefsManager.isProxyEnabled(applicationContext)) return@launch
             ProxyHistoryManager.recordSuccess(applicationContext, connectedProxy)
             ProxyState.connectionState.value = ConnectionState.Connected(connectedProxy)
             updateNotification("متصل: ${connectedProxy.host}:${connectedProxy.port} • ${connectedProxy.latencyMs}ms")
@@ -145,6 +180,8 @@ class ProxyScanService : Service() {
     }
 
     private fun updateNotification(text: String) {
+        if (stopped) return
+        lastStatus = text
         val manager = getSystemService(NotificationManager::class.java)
         manager?.notify(NOTIFICATION_ID, buildNotification(text))
     }

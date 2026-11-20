@@ -2,6 +2,14 @@ package com.proxybrowser.app.ui
 
 import com.proxybrowser.app.MainActivity
 import com.proxybrowser.app.R
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.draw.clip
+import com.proxybrowser.app.state.TabSession
+import com.proxybrowser.app.ui.theme.warningColor
 
 import android.annotation.SuppressLint
 import android.app.Activity
@@ -398,8 +406,9 @@ private object SuggestionsFetcher {
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun BrowserScreen(
-    proxy: ProxyInfo,
-    onProxyLost: () -> Unit
+    proxy: ProxyInfo?,
+    onProxyLost: () -> Unit,
+    onSetProxyEnabled: (Boolean) -> Unit
 ) {
     val context = LocalContext.current
 
@@ -411,7 +420,12 @@ fun BrowserScreen(
 
     var proxyReady by remember { mutableStateOf(false) }
     var proxySupported by remember { mutableStateOf(true) }
-    var isProxyOn by remember { mutableStateOf(true) }
+    // proxy == null يعني المستخدم موقف البروكسي (تصفح مباشر)
+    val isProxyOn = proxy != null
+    // نسخة محدّثة دائماً للاستخدام داخل كولباكات WebView طويلة العمر
+    val currentProxy by rememberUpdatedState(proxy)
+    var showProxyDialog by remember { mutableStateOf(false) }
+    var showDisableConfirm by remember { mutableStateOf(false) }
     var livePingMs by remember { mutableStateOf<Long?>(null) }
 
     var showUiCustomizeDialog by remember { mutableStateOf(false) }
@@ -421,7 +435,7 @@ fun BrowserScreen(
     var toolbarOrder by remember { mutableStateOf(UiPrefsManager.getToolbarOrder(context)) }
     var toolbarHidden by remember { mutableStateOf(UiPrefsManager.getToolbarHidden(context)) }
 
-    val addressBarCorner = if (addressBarShape == "square") 4.dp else 20.dp
+    val addressBarCorner = if (addressBarShape == "square") 4.dp else 24.dp
     val iconButtonSize = when (uiScale) {
         "compact" -> 36.dp
         "comfortable" -> 52.dp
@@ -623,7 +637,7 @@ fun BrowserScreen(
             )
             addJavascriptInterface(
                 SecurityBridge { found ->
-                    if (found && isProxyOn && tab.id == activeTabId &&
+                    if (found && currentProxy != null && tab.id == activeTabId &&
                         !PrefsManager.getSensitiveLoginWarningSuppressed(context)
                     ) {
                         showSensitiveLoginWarning = true
@@ -733,7 +747,7 @@ fun BrowserScreen(
                     // نعيد الفحص فقط عند فشل اتصال حقيقي بالبروكسي، مو عند حظر
                     // إعلان أو منع نافذة منبثقة أو أي خطأ عادي ثاني
                     val errorCode = error?.errorCode
-                    if (isProxyOn &&
+                    if (currentProxy != null &&
                         request?.isForMainFrame == true &&
                         !lostTriggered &&
                         errorCode != null &&
@@ -916,9 +930,26 @@ fun BrowserScreen(
     // إنشاء أول تبويب عند فتح المتصفح لأول مرة. مهم: هذا يعتمد على وجود
     // containerRef مسبقاً، لهذا الحاوية (FrameLayout) الحين تُبنى مباشرة
     // بدون انتظار جاهزية البروكسي (proxyReady) — انظر شجرة الواجهة بالأسفل.
+    // نحفظ روابط التبويبات لما الشاشة تنهدم (مثلاً تفعيل البروكسي من جديد يمر بشاشة الفحص)
+    DisposableEffect(Unit) {
+        onDispose {
+            TabSession.urls = tabs.map { it.url }
+            TabSession.activeIndex = tabs.indexOfFirst { it.id == activeTabId }.coerceAtLeast(0)
+        }
+    }
+
     LaunchedEffect(Unit) {
         if (tabs.isEmpty()) {
-            openTab(PrefsManager.getHomepage(context), activate = true)
+            val saved = TabSession.urls
+            if (saved.isNotEmpty()) {
+                val activeIdx = TabSession.activeIndex.coerceIn(0, saved.lastIndex)
+                TabSession.urls = emptyList()
+                saved.forEachIndexed { index, savedUrl ->
+                    openTab(savedUrl, activate = index == activeIdx)
+                }
+            } else {
+                openTab(PrefsManager.getHomepage(context), activate = true)
+            }
         }
         if (PrefsManager.shouldShowWhatsNew(context)) {
             showWhatsNewDialog = true
@@ -949,8 +980,9 @@ fun BrowserScreen(
     // من الفحص الأول كما هو (توفيراً للبيانات والبطارية)
     LaunchedEffect(isProxyOn, proxy) {
         while (true) {
-            if (isProxyOn && isOnWifi(context)) {
-                livePingMs = measureLivePing(proxy)
+            val activeProxy = proxy
+            if (activeProxy != null && isOnWifi(context)) {
+                livePingMs = measureLivePing(activeProxy)
             } else {
                 livePingMs = null
             }
@@ -988,7 +1020,7 @@ fun BrowserScreen(
     LaunchedEffect(addressBarInput, addressBarEditing) {
         if (addressBarEditing && addressBarInput.isNotBlank()) {
             delay(300)
-            suggestions = SuggestionsFetcher.fetch(addressBarInput, if (isProxyOn) proxy else null)
+            suggestions = SuggestionsFetcher.fetch(addressBarInput, proxy)
         } else {
             suggestions = emptyList()
         }
@@ -1007,7 +1039,7 @@ fun BrowserScreen(
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
             proxySupported = false
             proxyReady = true
-        } else if (isProxyOn) {
+        } else if (proxy != null) {
             val scheme = if (proxy.type == ProxyType.SOCKS5) "socks5" else "http"
             val builder = ProxyConfig.Builder()
                 .addProxyRule("$scheme://${proxy.host}:${proxy.port}")
@@ -1045,6 +1077,14 @@ fun BrowserScreen(
                     Surface(
                         shape = RoundedCornerShape(addressBarCorner),
                         color = MaterialTheme.colorScheme.surfaceVariant,
+                        border = BorderStroke(
+                            width = if (addressBarEditing) 2.dp else 1.dp,
+                            color = if (addressBarEditing) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.outlineVariant
+                            }
+                        ),
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 10.dp, vertical = 6.dp)
@@ -1231,6 +1271,8 @@ fun BrowserScreen(
                 if ((activeTab?.progress ?: 100) in 1..99) {
                     LinearProgressIndicator(
                         progress = { (activeTab?.progress ?: 100) / 100f },
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = Color.Transparent,
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
@@ -1309,17 +1351,20 @@ fun BrowserScreen(
 
                     // مربع صغير فيه رقم عدد التبويبات — الضغط عليه يفتح قائمة التبويبات
                     Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(10.dp),
+                        color = Color.Transparent,
+                        border = BorderStroke(2.dp, MaterialTheme.colorScheme.onSurfaceVariant),
                         modifier = Modifier
-                            .padding(horizontal = 6.dp)
-                            .size(iconButtonSize.coerceAtLeast(32.dp))
+                            .padding(horizontal = 8.dp)
+                            .size((iconButtonSize - 14.dp).coerceAtLeast(26.dp))
+                            .clip(RoundedCornerShape(10.dp))
                             .clickable { showTabsDialog = true }
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             Text(
                                 text = tabs.size.toString(),
-                                fontSize = 14.sp,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
                                 style = MaterialTheme.typography.labelLarge
                             )
                         }
@@ -1368,26 +1413,50 @@ fun BrowserScreen(
 
     Scaffold(
         topBar = {
-            Column {
+            Column(modifier = Modifier.background(MaterialTheme.colorScheme.surface)) {
                 TopAppBar(
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    ),
                     title = {
                         val currentHost = activeTab?.url?.let { Uri.parse(it).host }
                         val isBypassed = ProxyBypassManager.isBypassed(context, currentHost)
-                        val status = when {
-                            isBypassed -> "بدون بروكسي (استثناء لهذا الموقع)"
-                            isProxyOn -> {
-                                val pingText = livePingMs?.let { "${it}ms 📶" } ?: "${proxy.latencyMs}ms"
+                        val accent = when {
+                            isBypassed -> MaterialTheme.colorScheme.secondary
+                            proxy != null -> MaterialTheme.colorScheme.tertiary
+                            else -> warningColor()
+                        }
+                        val statusTitle = when {
+                            isBypassed -> "استثناء لهذا الموقع"
+                            proxy != null -> "محمي بالبروكسي"
+                            else -> "البروكسي موقوف"
+                        }
+                        val statusDetail = when {
+                            isBypassed -> "اتصال مباشر لهذا الموقع فقط"
+                            proxy != null -> {
+                                val pingText = livePingMs?.let { "${it}ms 📶" }
+                                    ?: proxy.latencyMs?.let { "${it}ms" }
+                                    ?: "—"
                                 "${proxy.host}:${proxy.port} • $pingText"
                             }
-                            else -> "اتصال مباشر"
+                            else -> "اتصال مباشر — اضغط للتفاصيل"
                         }
-                        Text(status, style = MaterialTheme.typography.titleSmall)
+                        ProxyStatusPill(
+                            title = statusTitle,
+                            detail = statusDetail,
+                            accent = accent,
+                            onClick = { showProxyDialog = true }
+                        )
                     },
                     actions = {
-                        IconButton(onClick = { isProxyOn = !isProxyOn }) {
+                        // زر تشغيل/إيقاف البروكسي بالكامل (الإيقاف يحتاج تأكيد ويتحفظ)
+                        IconButton(onClick = {
+                            if (isProxyOn) showDisableConfirm = true else onSetProxyEnabled(true)
+                        }) {
                             Icon(
-                                imageVector = if (isProxyOn) Icons.Filled.Wifi else Icons.Filled.WifiOff,
-                                contentDescription = if (isProxyOn) "إيقاف البروكسي" else "تشغيل البروكسي"
+                                imageVector = Icons.Filled.PowerSettingsNew,
+                                contentDescription = if (isProxyOn) "إيقاف البروكسي" else "تفعيل البروكسي",
+                                tint = if (isProxyOn) MaterialTheme.colorScheme.tertiary else warningColor()
                             )
                         }
                         IconButton(onClick = {
@@ -1423,6 +1492,7 @@ fun BrowserScreen(
                                     },
                                     onClick = { showOverflowMenu = false; toggleReaderMode() }
                                 )
+                                HorizontalDivider()
                                 DropdownMenuItem(
                                     text = { Text("سجل التصفح") },
                                     onClick = {
@@ -1458,6 +1528,7 @@ fun BrowserScreen(
                                         activeTab?.webView?.reload()
                                     }
                                 )
+                                HorizontalDivider()
                                 DropdownMenuItem(
                                     text = { Text(if (isDarkTheme) "✓ الثيم الداكن" else "الثيم الداكن") },
                                     leadingIcon = { Icon(Icons.Filled.DarkMode, contentDescription = null) },
@@ -1505,6 +1576,7 @@ fun BrowserScreen(
                                         }
                                     }
                                 )
+                                HorizontalDivider()
                                 DropdownMenuItem(
                                     text = { Text("بحث بالصفحة الحالية") },
                                     leadingIcon = { Icon(Icons.Filled.FindInPage, contentDescription = null) },
@@ -1521,6 +1593,7 @@ fun BrowserScreen(
                                         captureFullPageScreenshot(context, activeTab?.webView)
                                     }
                                 )
+                                HorizontalDivider()
                                 DropdownMenuItem(
                                     text = { Text("تصدير المفضلة") },
                                     leadingIcon = { Icon(Icons.Filled.FileDownload, contentDescription = null) },
@@ -1544,13 +1617,15 @@ fun BrowserScreen(
                                         importChromeLauncher.launch("text/html")
                                     }
                                 )
-                                DropdownMenuItem(
-                                    text = { Text("بدّل البروكسي الآن") },
-                                    onClick = {
-                                        showOverflowMenu = false
-                                        onProxyLost()
-                                    }
-                                )
+                                if (isProxyOn) {
+                                    DropdownMenuItem(
+                                        text = { Text("بدّل البروكسي الآن") },
+                                        onClick = {
+                                            showOverflowMenu = false
+                                            onProxyLost()
+                                        }
+                                    )
+                                }
                                 DropdownMenuItem(
                                     text = { Text("تثبيت هذا الموقع بالشاشة الرئيسية") },
                                     onClick = {
@@ -1558,6 +1633,7 @@ fun BrowserScreen(
                                         activeTab?.let { pinSiteToHomeScreen(context, it) }
                                     }
                                 )
+                                HorizontalDivider()
                                 DropdownMenuItem(
                                     text = { Text("إحصائية حظر الإعلانات") },
                                     onClick = {
@@ -1584,14 +1660,20 @@ fun BrowserScreen(
                     }
                 )
 
+                if (!isProxyOn) {
+                    ProxyDisabledBanner(onEnable = { onSetProxyEnabled(true) })
+                }
+
                 if (addressBarPosition == "top") {
                     toolbarContent()
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 }
             }
         },
         bottomBar = {
             if (addressBarPosition == "bottom") {
-                Column {
+                Column(modifier = Modifier.background(MaterialTheme.colorScheme.surface)) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     toolbarContent()
                 }
             }
@@ -1659,7 +1741,7 @@ fun BrowserScreen(
                                 coroutineScope.launch {
                                     translationResult = translateSelectedText(
                                         textToTranslate,
-                                        if (isProxyOn) proxy else null
+                                        proxy
                                     )
                                     isTranslating = false
                                 }
@@ -1674,6 +1756,32 @@ fun BrowserScreen(
                 }
             }
         }
+    }
+
+    if (showProxyDialog) {
+        ProxyControlDialog(
+            proxy = proxy,
+            livePingMs = livePingMs,
+            onToggle = { wantOn ->
+                showProxyDialog = false
+                if (wantOn) onSetProxyEnabled(true) else showDisableConfirm = true
+            },
+            onSwitchProxy = {
+                showProxyDialog = false
+                onProxyLost()
+            },
+            onDismiss = { showProxyDialog = false }
+        )
+    }
+
+    if (showDisableConfirm) {
+        DisableProxyConfirmDialog(
+            onConfirm = {
+                showDisableConfirm = false
+                onSetProxyEnabled(false)
+            },
+            onDismiss = { showDisableConfirm = false }
+        )
     }
 
     fullscreenView?.let { fsView ->
@@ -1974,6 +2082,8 @@ fun BrowserScreen(
             title = { Text("الجديد بهذا التحديث") },
             text = {
                 Column {
+                    Text("• زر إيقاف البروكسي بالكامل — يتذكّر اختيارك حتى بعد إغلاق التطبيق")
+                    Text("• تصميم جديد: ثيم عصري، شريط حالة ذكي، وشاشة فحص متحركة")
                     Text("• إصلاح الوضع الداكن القسري للمواقع")
                     Text("• إصلاح تدوير الشاشة (ما يعيد فتح التطبيق من جديد)")
                     Text("• دعم تشغيل الفيديو بملء الشاشة")
@@ -2278,7 +2388,7 @@ fun BrowserScreen(
                     )
                     Spacer(modifier = Modifier.padding(top = 6.dp))
                     Text(
-                        if (isProxyOn) {
+                        if (proxy != null) {
                             "التصفح حالياً عبر بروكسي: ${proxy.host}:${proxy.port}"
                         } else {
                             "التصفح حالياً باتصال مباشر (بدون بروكسي)"

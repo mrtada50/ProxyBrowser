@@ -19,7 +19,23 @@ object PrefsManager {
     private const val KEY_DATA_SAVER = "data_saver"
     private const val KEY_WHATS_NEW_SEEN = "whats_new_seen"
     private const val KEY_SUPPRESS_LOGIN_WARNING = "suppress_login_warning"
+    private const val KEY_PROXY_ENABLED = "proxy_enabled"
     private const val DEFAULT_HOMEPAGE = "https://www.google.com"
+
+    /**
+     * هل البروكسي مفعّل؟ الافتراضي مفعّل. لما المستخدم يوقفه يدوياً تنحفظ القيمة هنا
+     * ويبقى موقوفاً (حتى بعد إغلاق التطبيق وفتحه) إلى أن يضغط "تفعيل" بنفسه.
+     */
+    fun isProxyEnabled(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_PROXY_ENABLED, true)
+    }
+
+    fun setProxyEnabled(context: Context, enabled: Boolean) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        // commit (مو apply) عشان القيمة تنكتب فوراً حتى لو انقتلت العملية بعدها مباشرة
+        prefs.edit().putBoolean(KEY_PROXY_ENABLED, enabled).commit()
+    }
 
     fun getHomepage(context: Context): String {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -62,7 +78,7 @@ object PrefsManager {
     }
 
     /** رقم يزيد يدوياً بكل دفعة ميزات جديدة، لعرض نافذة "الجديد بالتحديث" مرة وحدة. */
-    const val CURRENT_WHATS_NEW_VERSION = 3
+    const val CURRENT_WHATS_NEW_VERSION = 4
 
     fun shouldShowWhatsNew(context: Context): Boolean {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
