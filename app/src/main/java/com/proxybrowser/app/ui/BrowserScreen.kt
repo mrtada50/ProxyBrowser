@@ -17,7 +17,12 @@ import android.app.DownloadManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ContentValues
+import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
+import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.net.Uri
@@ -163,6 +168,58 @@ import kotlinx.coroutines.withContext
 import java.net.URLEncoder
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicInteger
+
+/** روابط ما يفتحها المتصفح نفسه: أي بروتوكول غير هذي يُمرَّر لتطبيق خارجي (whatsapp:// و tg:// و intent:// ...). */
+private val INTERNAL_SCHEMES = setOf("http", "https", "about", "data", "blob", "file", "javascript", "content", "view-source")
+
+private class ExternalLink(val intent: Intent, val fallbackUrl: String?)
+
+private class PendingExternalOpen(val link: ExternalLink, val key: String, val tab: TabState)
+
+/** يحوّل الرابط لـ Intent لو كان يخص تطبيق خارجي، وإلا يرجع null (يعني المتصفح يفتحه عادي). */
+private fun parseExternalLink(url: String): ExternalLink? {
+    return try {
+        val uri = Uri.parse(url)
+        val scheme = uri.scheme?.lowercase() ?: return null
+        if (scheme in INTERNAL_SCHEMES) return null
+        if (scheme == "intent") {
+            val intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
+            val fallback = intent.getStringExtra("browser_fallback_url")
+            // تنظيف أمني: ما نسمح للصفحة تحدد مكوّن معيّن أو صلاحيات وصول للملفات
+            intent.addCategory(Intent.CATEGORY_BROWSABLE)
+            intent.component = null
+            intent.selector = null
+            val grantFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+                Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
+            intent.flags = intent.flags and grantFlags.inv()
+            ExternalLink(intent, fallback)
+        } else {
+            val intent = Intent(Intent.ACTION_VIEW, uri)
+            intent.addCategory(Intent.CATEGORY_BROWSABLE)
+            ExternalLink(intent, null)
+        }
+    } catch (e: Exception) {
+        null
+    }
+}
+
+/** يفتح التطبيق الخارجي؛ لو غير مثبت يستخدم رابط الاحتياط (إن وُجد) أو يعرض تنبيه. */
+private fun launchExternal(context: Context, link: ExternalLink, onFallback: (String) -> Unit) {
+    try {
+        context.startActivity(link.intent)
+    } catch (e: ActivityNotFoundException) {
+        val fallback = link.fallbackUrl
+        if (fallback != null && (fallback.startsWith("http://") || fallback.startsWith("https://"))) {
+            onFallback(fallback)
+        } else {
+            Toast.makeText(context, "التطبيق غير مثبت على الجهاز", Toast.LENGTH_SHORT).show()
+        }
+    } catch (e: SecurityException) {
+        Toast.makeText(context, "تعذّر فتح التطبيق", Toast.LENGTH_SHORT).show()
+    }
+}
 
 private data class PendingDownload(
     val url: String,
@@ -426,6 +483,8 @@ fun BrowserScreen(
     val currentProxy by rememberUpdatedState(proxy)
     var showProxyDialog by remember { mutableStateOf(false) }
     var showDisableConfirm by remember { mutableStateOf(false) }
+    // رابط يخص تطبيق خارجي ينتظر اختيار المستخدم (فتح دائماً / مرة واحدة)
+    var pendingExternal by remember { mutableStateOf<PendingExternalOpen?>(null) }
     var livePingMs by remember { mutableStateOf<Long?>(null) }
 
     var showUiCustomizeDialog by remember { mutableStateOf(false) }
@@ -583,6 +642,15 @@ fun BrowserScreen(
         addressBarText = tabs.find { it.id == id }?.url ?: ""
     }
 
+    fun handleExternalLink(link: ExternalLink, tab: TabState) {
+        val key = "scheme:" + (link.intent.scheme ?: "intent")
+        if (PrefsManager.isExternalAlwaysAllowed(context, key)) {
+            launchExternal(context, link) { fallback -> tab.webView?.loadUrl(fallback) }
+        } else {
+            pendingExternal = PendingExternalOpen(link, key, tab)
+        }
+    }
+
     fun configureWebView(tab: TabState): WebView {
         val initialHost = Uri.parse(tab.url).host
         val wantDark = ForceDarkManager.isEnabled(context) && !ForceDarkManager.isSiteExempt(context, initialHost)
@@ -715,6 +783,16 @@ fun BrowserScreen(
 
                     CookieManager.getInstance().flush()
                     swipeRefreshRef?.isRefreshing = false
+                }
+
+                override fun shouldOverrideUrlLoading(
+                    view: WebView?,
+                    request: WebResourceRequest?
+                ): Boolean {
+                    if (request == null || !request.isForMainFrame) return false
+                    val link = parseExternalLink(request.url.toString()) ?: return false
+                    handleExternalLink(link, tab)
+                    return true
                 }
 
                 override fun shouldInterceptRequest(
@@ -1647,6 +1725,14 @@ fun BrowserScreen(
                                     )
                                 }
                                 DropdownMenuItem(
+                                    text = { Text("مسح اختيارات فتح التطبيقات") },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        PrefsManager.clearExternalAlwaysAllowed(context)
+                                        Toast.makeText(context, "تم المسح — سيسألك عند كل رابط تطبيق", Toast.LENGTH_SHORT).show()
+                                    }
+                                )
+                                DropdownMenuItem(
                                     text = { Text("تثبيت هذا الموقع بالشاشة الرئيسية") },
                                     onClick = {
                                         showOverflowMenu = false
@@ -1777,6 +1863,53 @@ fun BrowserScreen(
                 }
             }
         }
+    }
+
+    pendingExternal?.let { pending ->
+        val appLabel = remember(pending) {
+            runCatching {
+                pending.link.intent.`package`?.let { pkg ->
+                    val pm = context.packageManager
+                    pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+                }
+            }.getOrNull()
+        }
+        val schemeLabel = pending.link.intent.scheme ?: "تطبيق"
+        AlertDialog(
+            onDismissRequest = { pendingExternal = null },
+            icon = { Icon(Icons.Filled.OpenInNew, contentDescription = null) },
+            title = { Text("فتح في تطبيق؟", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        if (appLabel != null) {
+                            "هذا الرابط يريد فتح تطبيق «$appLabel»."
+                        } else {
+                            "هذا الرابط يريد فتح تطبيق خارجي ($schemeLabel)."
+                        }
+                    )
+                    Button(
+                        onClick = {
+                            PrefsManager.addExternalAlwaysAllowed(context, pending.key)
+                            launchExternal(context, pending.link) { fb -> pending.tab.webView?.loadUrl(fb) }
+                            pendingExternal = null
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("فتح دائماً") }
+                    OutlinedButton(
+                        onClick = {
+                            launchExternal(context, pending.link) { fb -> pending.tab.webView?.loadUrl(fb) }
+                            pendingExternal = null
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("فتح مرة واحدة") }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { pendingExternal = null }) { Text("إلغاء") }
+            }
+        )
     }
 
     if (showProxyDialog) {
@@ -2103,6 +2236,7 @@ fun BrowserScreen(
             title = { Text("الجديد بهذا التحديث") },
             text = {
                 Column {
+                    Text("• الروابط اللي تفتح تطبيقات (واتساب، تيليجرام...) صارت تشتغل مع خيار «فتح دائماً» أو «مرة واحدة»")
                     Text("• زر إيقاف البروكسي بالكامل — يتذكّر اختيارك حتى بعد إغلاق التطبيق")
                     Text("• تصميم جديد: ثيم عصري، شريط حالة ذكي، وشاشة فحص متحركة")
                     Text("• إصلاح الوضع الداكن القسري للمواقع")

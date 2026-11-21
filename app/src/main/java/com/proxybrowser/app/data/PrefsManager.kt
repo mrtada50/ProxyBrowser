@@ -20,7 +20,27 @@ object PrefsManager {
     private const val KEY_WHATS_NEW_SEEN = "whats_new_seen"
     private const val KEY_SUPPRESS_LOGIN_WARNING = "suppress_login_warning"
     private const val KEY_PROXY_ENABLED = "proxy_enabled"
+    private const val KEY_EXTERNAL_ALWAYS = "external_open_always"
     private const val DEFAULT_HOMEPAGE = "https://www.google.com"
+
+    /** هل المستخدم اختار "فتح دائماً" لهذا النوع من الروابط الخارجية (مثل whatsapp أو tg)؟ */
+    fun isExternalAlwaysAllowed(context: Context, key: String): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getStringSet(KEY_EXTERNAL_ALWAYS, emptySet())?.contains(key) == true
+    }
+
+    fun addExternalAlwaysAllowed(context: Context, key: String) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        // لازم ننسخ المجموعة — ممنوع نعدّل الـ Set اللي يرجعها SharedPreferences مباشرة
+        val updated = HashSet(prefs.getStringSet(KEY_EXTERNAL_ALWAYS, emptySet()) ?: emptySet())
+        updated.add(key)
+        prefs.edit().putStringSet(KEY_EXTERNAL_ALWAYS, updated).apply()
+    }
+
+    fun clearExternalAlwaysAllowed(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().remove(KEY_EXTERNAL_ALWAYS).apply()
+    }
 
     /**
      * هل البروكسي مفعّل؟ الافتراضي مفعّل. لما المستخدم يوقفه يدوياً تنحفظ القيمة هنا
