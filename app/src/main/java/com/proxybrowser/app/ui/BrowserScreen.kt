@@ -1168,7 +1168,14 @@ fun BrowserScreen(
                                 }
                             } else {
                                 Text(
-                                    text = (activeTab?.title?.ifBlank { null } ?: addressBarText).ifBlank { "ابحث أو اكتب رابط" },
+                                    text = (
+                                        activeTab?.url
+                                            ?.let { runCatching { Uri.parse(it).host }.getOrNull() }
+                                            ?.removePrefix("www.")
+                                            ?.ifBlank { null }
+                                            ?: activeTab?.title?.ifBlank { null }
+                                            ?: addressBarText
+                                        ).ifBlank { "ابحث أو اكتب رابط" },
                                     maxLines = 1,
                                     style = MaterialTheme.typography.bodyMedium.copy(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1277,6 +1284,47 @@ fun BrowserScreen(
                     )
                 }
 
+                if (showFindBar) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = findQuery,
+                            onValueChange = {
+                                findQuery = it
+                                activeTab?.webView?.findAllAsync(it)
+                            },
+                            singleLine = true,
+                            placeholder = { Text("بحث بالصفحة") },
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            findMatchInfo,
+                            modifier = Modifier.padding(horizontal = 8.dp),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        IconButton(onClick = { activeTab?.webView?.findNext(false) }) {
+                            Icon(Icons.Filled.ArrowBack, contentDescription = "السابق")
+                        }
+                        IconButton(onClick = { activeTab?.webView?.findNext(true) }) {
+                            Icon(Icons.Filled.ArrowForward, contentDescription = "التالي")
+                        }
+                        IconButton(onClick = {
+                            activeTab?.webView?.clearMatches()
+                            showFindBar = false
+                            findQuery = ""
+                            findMatchInfo = ""
+                        }) {
+                            Icon(Icons.Filled.Close, contentDescription = "إغلاق البحث")
+                        }
+                    }
+                }
+    }
+
+    val navBarContent: @Composable () -> Unit = {
                 // صف أزرار التنقل + مربع عدد التبويبات + المفضلة
                 Row(
                     modifier = Modifier
@@ -1286,12 +1334,18 @@ fun BrowserScreen(
                 ) {
                     toolbarOrder.forEach { id ->
                         if (id in toolbarHidden) return@forEach
+                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
                         when (id) {
                             "back" -> IconButton(
                                 onClick = { activeTab?.webView?.goBack() },
                                 modifier = Modifier.size(iconButtonSize)
                             ) {
-                                Icon(Icons.Filled.ArrowBack, contentDescription = "رجوع", modifier = Modifier.size(iconGlyphSize))
+                                Icon(
+                                    Icons.Filled.ArrowBack,
+                                    contentDescription = "رجوع",
+                                    modifier = Modifier.size(iconGlyphSize),
+                                    tint = if (activeTab?.canGoBack == true) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline
+                                )
                             }
                             "forward" -> IconButton(
                                 onClick = { activeTab?.webView?.goForward() },
@@ -1334,11 +1388,11 @@ fun BrowserScreen(
                                 Icon(Icons.Filled.List, contentDescription = "المفضلة", modifier = Modifier.size(iconGlyphSize))
                             }
                         }
+                        }
                     }
 
-                    Spacer(modifier = Modifier.weight(1f))
-
                     if ((activeTab?.mediaLinks?.size ?: 0) > 0) {
+                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
                         IconButton(onClick = { showMediaDialog = true }, modifier = Modifier.size(iconButtonSize)) {
                             Icon(
                                 Icons.Filled.PlayCircle,
@@ -1347,9 +1401,11 @@ fun BrowserScreen(
                                 tint = MaterialTheme.colorScheme.primary
                             )
                         }
+                        }
                     }
 
                     // مربع صغير فيه رقم عدد التبويبات — الضغط عليه يفتح قائمة التبويبات
+                    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
                     Surface(
                         shape = RoundedCornerShape(10.dp),
                         color = Color.Transparent,
@@ -1369,44 +1425,6 @@ fun BrowserScreen(
                             )
                         }
                     }
-                }
-
-                if (showFindBar) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 10.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = findQuery,
-                            onValueChange = {
-                                findQuery = it
-                                activeTab?.webView?.findAllAsync(it)
-                            },
-                            singleLine = true,
-                            placeholder = { Text("بحث بالصفحة") },
-                            modifier = Modifier.weight(1f)
-                        )
-                        Text(
-                            findMatchInfo,
-                            modifier = Modifier.padding(horizontal = 8.dp),
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        IconButton(onClick = { activeTab?.webView?.findNext(false) }) {
-                            Icon(Icons.Filled.ArrowBack, contentDescription = "السابق")
-                        }
-                        IconButton(onClick = { activeTab?.webView?.findNext(true) }) {
-                            Icon(Icons.Filled.ArrowForward, contentDescription = "التالي")
-                        }
-                        IconButton(onClick = {
-                            activeTab?.webView?.clearMatches()
-                            showFindBar = false
-                            findQuery = ""
-                            findMatchInfo = ""
-                        }) {
-                            Icon(Icons.Filled.Close, contentDescription = "إغلاق البحث")
-                        }
                     }
                 }
     }
@@ -1414,11 +1432,14 @@ fun BrowserScreen(
     Scaffold(
         topBar = {
             Column(modifier = Modifier.background(MaterialTheme.colorScheme.surface)) {
-                TopAppBar(
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surface
-                    ),
-                    title = {
+                // صف الحالة المضغوط: كبسولة البروكسي + أزرار سريعة (بدل شريط التطبيق الكبير)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 12.dp, end = 4.dp, top = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(modifier = Modifier.weight(1f)) {
                         val currentHost = activeTab?.url?.let { Uri.parse(it).host }
                         val isBypassed = ProxyBypassManager.isBypassed(context, currentHost)
                         val accent = when {
@@ -1447,8 +1468,7 @@ fun BrowserScreen(
                             accent = accent,
                             onClick = { showProxyDialog = true }
                         )
-                    },
-                    actions = {
+                    }
                         // زر تشغيل/إيقاف البروكسي بالكامل (الإيقاف يحتاج تأكيد ويتحفظ)
                         IconButton(onClick = {
                             if (isProxyOn) showDisableConfirm = true else onSetProxyEnabled(true)
@@ -1658,7 +1678,6 @@ fun BrowserScreen(
                             }
                         }
                     }
-                )
 
                 if (!isProxyOn) {
                     ProxyDisabledBanner(onEnable = { onSetProxyEnabled(true) })
@@ -1666,16 +1685,18 @@ fun BrowserScreen(
 
                 if (addressBarPosition == "top") {
                     toolbarContent()
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
         },
         bottomBar = {
-            if (addressBarPosition == "bottom") {
-                Column(modifier = Modifier.background(MaterialTheme.colorScheme.surface)) {
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            // شريط سفلي دائماً: (شريط العنوان لو اخترت مكانه تحت) + أزرار التنقل
+            Column(modifier = Modifier.background(MaterialTheme.colorScheme.surface)) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                if (addressBarPosition == "bottom") {
                     toolbarContent()
                 }
+                navBarContent()
             }
         }
     ) { padding ->

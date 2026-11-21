@@ -11,8 +11,22 @@ android {
         applicationId = "com.proxybrowser.app"
         minSdk = 29
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        // رقم الإصدار يزيد تلقائياً مع كل بناء على GitHub Actions، عشان التحديث يتثبّت فوق القديم
+        val runNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
+        versionCode = runNumber
+        versionName = "1.$runNumber"
+    }
+
+    // مفتاح توقيع ثابت: كل نسخة تنبني تتوقّع بنفس المفتاح، فيتثبّت التحديث فوق القديم
+    // بدون حذف التطبيق وإعادة تثبيته
+    signingConfigs {
+        create("shared") {
+            storeFile = file("proxybrowser.jks")
+            storeType = "pkcs12"
+            storePassword = "proxybrowser123"
+            keyAlias = "proxybrowser"
+            keyPassword = "proxybrowser123"
+        }
     }
 
     buildFeatures {
@@ -24,7 +38,11 @@ android {
     }
 
     buildTypes {
+        getByName("debug") {
+            signingConfig = signingConfigs.getByName("shared")
+        }
         release {
+            signingConfig = signingConfigs.getByName("shared")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
