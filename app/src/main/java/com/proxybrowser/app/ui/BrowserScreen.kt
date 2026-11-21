@@ -485,6 +485,8 @@ fun BrowserScreen(
     var showDisableConfirm by remember { mutableStateOf(false) }
     // رابط يخص تطبيق خارجي ينتظر اختيار المستخدم (فتح دائماً / مرة واحدة)
     var pendingExternal by remember { mutableStateOf<PendingExternalOpen?>(null) }
+    // تبويب منبثق فاضي نبي نسكّره بعد ما فتحنا الرابط في التطبيق الخارجي
+    var tabToClose by remember { mutableStateOf<Int?>(null) }
     var livePingMs by remember { mutableStateOf<Long?>(null) }
 
     var showUiCustomizeDialog by remember { mutableStateOf(false) }
@@ -822,6 +824,29 @@ fun BrowserScreen(
                     error: WebResourceError?
                 ) {
                     super.onReceivedError(view, request, error)
+
+                    // شبكة أمان: بعض الحالات (الكتابة بشريط العنوان، النوافذ المنبثقة) تتجاوز
+                    // shouldOverrideUrlLoading وتطلع ERR_UNKNOWN_URL_SCHEME — نعالجها هنا
+                    if (request?.isForMainFrame == true &&
+                        error?.errorCode == WebViewClient.ERROR_UNSUPPORTED_SCHEME
+                    ) {
+                        val externalLink = parseExternalLink(request.url.toString())
+                        if (externalLink != null) {
+                            handleExternalLink(externalLink, tab)
+                            view?.let { v ->
+                                v.stopLoading()
+                                if (v.canGoBack()) {
+                                    v.goBack()
+                                } else if (tab.url.isBlank()) {
+                                    tabToClose = tab.id
+                                } else {
+                                    v.loadUrl(PrefsManager.getHomepage(context))
+                                }
+                            }
+                            return
+                        }
+                    }
+
                     // نعيد الفحص فقط عند فشل اتصال حقيقي بالبروكسي، مو عند حظر
                     // إعلان أو منع نافذة منبثقة أو أي خطأ عادي ثاني
                     val errorCode = error?.errorCode
@@ -1008,6 +1033,13 @@ fun BrowserScreen(
     // إنشاء أول تبويب عند فتح المتصفح لأول مرة. مهم: هذا يعتمد على وجود
     // containerRef مسبقاً، لهذا الحاوية (FrameLayout) الحين تُبنى مباشرة
     // بدون انتظار جاهزية البروكسي (proxyReady) — انظر شجرة الواجهة بالأسفل.
+    LaunchedEffect(tabToClose) {
+        tabToClose?.let { id ->
+            closeTab(id)
+            tabToClose = null
+        }
+    }
+
     // نحفظ روابط التبويبات لما الشاشة تنهدم (مثلاً تفعيل البروكسي من جديد يمر بشاشة الفحص)
     DisposableEffect(Unit) {
         onDispose {
@@ -2800,6 +2832,12 @@ private fun normalizeUrl(input: String): String {
 /** إذا النص المكتوب مو شكل رابط (فيه مسافات أو ماكو نقطة)، نرسله كبحث جوجل بدل ما نحاول نفتحه كرابط مكسور. */
 private fun resolveAddressInput(input: String): String {
     val trimmed = input.trim()
+    val lower = trimmed.lowercase()
+    val hasOtherScheme = Regex("^[a-z][a-z0-9+.-]*://").containsMatchIn(lower) &&
+        !lower.startsWith("http://") && !lower.startsWith("https://")
+    val isSpecialScheme = lower.startsWith("mailto:") || lower.startsWith("tel:") ||
+        lower.startsWith("sms:") || lower.startsWith("intent:")
+    if (hasOtherScheme || isSpecialScheme) return trimmed
     val looksLikeUrl = !trimmed.contains(" ") && (trimmed.contains(".") || trimmed.startsWith("http"))
     return if (looksLikeUrl) {
         normalizeUrl(trimmed)
