@@ -517,6 +517,7 @@ fun BrowserScreen(
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showFavoritesDialog by remember { mutableStateOf(false) }
     var showHistoryDialog by remember { mutableStateOf(false) }
+    var showDownloadsDialog by remember { mutableStateOf(false) }
     var showTabsDialog by remember { mutableStateOf(false) }
     var showMediaDialog by remember { mutableStateOf(false) }
     var showOverflowMenu by remember { mutableStateOf(false) }
@@ -1624,6 +1625,13 @@ fun BrowserScreen(
                                 )
                                 HorizontalDivider()
                                 DropdownMenuItem(
+                                    text = { Text("التنزيلات") },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        showDownloadsDialog = true
+                                    }
+                                )
+                                DropdownMenuItem(
                                     text = { Text("سجل التصفح") },
                                     onClick = {
                                         showOverflowMenu = false
@@ -2268,6 +2276,7 @@ fun BrowserScreen(
             title = { Text("الجديد بهذا التحديث") },
             text = {
                 Column {
+                    Text("• قائمة تنزيلات: فتح الملفات وحذفها ومتابعة التقدم (من القائمة ⋮)")
                     Text("• الروابط اللي تفتح تطبيقات (واتساب، تيليجرام...) صارت تشتغل مع خيار «فتح دائماً» أو «مرة واحدة»")
                     Text("• زر إيقاف البروكسي بالكامل — يتذكّر اختيارك حتى بعد إغلاق التطبيق")
                     Text("• تصميم جديد: ثيم عصري، شريط حالة ذكي، وشاشة فحص متحركة")
@@ -2487,6 +2496,10 @@ fun BrowserScreen(
                 TextButton(onClick = { editingFavorite = null }) { Text("إلغاء") }
             }
         )
+    }
+
+    if (showDownloadsDialog) {
+        DownloadsDialog(onDismiss = { showDownloadsDialog = false })
     }
 
     if (showHistoryDialog) {
@@ -2808,6 +2821,7 @@ private fun startDownload(context: android.content.Context, dl: PendingDownload)
         }
         val manager = context.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as DownloadManager
         manager.enqueue(request)
+        Toast.makeText(context, "بدأ التنزيل — تجده في «التنزيلات» من القائمة ⋮", Toast.LENGTH_SHORT).show()
     } catch (e: Exception) {
         // تجاهل فشل التنزيل (مثلاً اسم ملف غير صالح أو رابط غير مدعوم)
     }
